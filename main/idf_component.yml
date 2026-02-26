@@ -1,0 +1,12 @@
+dependencies:
+  idf: ">=5.1"
+  espressif/mdns:
+    version: "*"
+  espressif/esp-zigbee-lib:
+    version: "~1.6.0"
+  espressif/esp-zboss-lib:
+    version: "~1.6.0"
+  espressif/esp_rcp_update:
+    version: "~0.3.0"
+  espressif/esp-serial-flasher:
+    version: "~0.0.4"

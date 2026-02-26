@@ -1,0 +1,68 @@
+menu "Zigbee Gateway Configuration"
+
+    config GW_WIFI_SSID
+        string "Default WiFi SSID"
+        default ""
+        help
+            WiFi SSID for station mode. Can be changed at runtime via web UI.
+
+    config GW_WIFI_PASSWORD
+        string "Default WiFi Password"
+        default ""
+        help
+            WiFi password for station mode. Can be changed at runtime via web UI.
+
+    config GW_ZIGBEE_CHANNEL
+        int "Zigbee Channel (11-26, 0=auto)"
+        default 0
+        range 0 26
+
+    config GW_MAX_DEVICES
+        int "Maximum Zigbee devices"
+        default 32
+        range 8 64
+
+    config GW_AP_PASSWORD
+        string "AP mode WiFi password (min 8 chars for WPA2)"
+        default "zigbee1234"
+        help
+            Password for the fallback AP mode. Must be at least 8 characters for WPA2.
+
+    config GW_HTTP_PASSWORD
+        string "Default HTTP admin password"
+        default "admin"
+        help
+            Default password for HTTP Basic Auth on POST endpoints.
+            Can be changed at runtime via web UI (stored in NVS).
+
+endmenu
+
+menu "ESP Zigbee gateway rcp update"
+    depends on ZB_RADIO_SPINEL_UART
+
+    menu "Board Configuration"
+        config PIN_TO_RCP_RESET
+            int "Pin to RCP reset"
+            default 7
+
+        config PIN_TO_RCP_BOOT
+            int "Pin to RCP boot"
+            default 8
+
+        config PIN_TO_RCP_TX
+            int "Pin to RCP TX"
+            default 17
+
+        config PIN_TO_RCP_RX
+            int "Pin to RCP RX"
+            default 18
+    endmenu
+
+    config ZIGBEE_GW_AUTO_UPDATE_RCP
+        bool "Update RCP automatically"
+        default y
+        help
+            If enabled, the gateway stores the RCP image in SPIFFS and
+            compares versions on boot. RCP is updated on mismatch.
+
+endmenu

@@ -1,0 +1,767 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Zigbee Gateway</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#111318;--card:#1c1e24;--sidebar:#1c1e24;
+  --primary:#4fc3f7;--accent:#03a9f4;--danger:#ef5350;--success:#66bb6a;--warn:#ffa726;
+  --text:#e1e1e1;--text2:#9b9b9b;--border:#2a2d35;
+  --radius:12px;--shadow:0 2px 8px rgba(0,0,0,.3);
+}
+html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);font-size:14px}
+a{color:var(--primary);text-decoration:none}
+
+/* Layout */
+.app{display:flex;height:100vh}
+.sidebar{width:240px;background:var(--sidebar);border-right:1px solid var(--border);display:flex;flex-direction:column;flex-shrink:0;z-index:10}
+.sidebar .logo{padding:20px;display:flex;align-items:center;gap:12px;border-bottom:1px solid var(--border)}
+.sidebar .logo svg{width:32px;height:32px;fill:var(--primary)}
+.sidebar .logo span{font-size:16px;font-weight:600}
+.sidebar nav{flex:1;padding:8px}
+.sidebar nav a{display:flex;align-items:center;gap:12px;padding:10px 16px;border-radius:8px;color:var(--text2);transition:.15s}
+.sidebar nav a:hover{background:rgba(255,255,255,.05);color:var(--text)}
+.sidebar nav a.active{background:rgba(3,169,244,.15);color:var(--primary)}
+.sidebar nav a svg{width:20px;height:20px;fill:currentColor;flex-shrink:0}
+.sidebar .version{padding:16px;color:var(--text2);font-size:12px;border-top:1px solid var(--border)}
+.main{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.topbar{display:flex;align-items:center;padding:16px 24px;border-bottom:1px solid var(--border);gap:16px}
+.topbar h1{font-size:20px;font-weight:500;flex:1}
+.topbar .badges{display:flex;gap:8px}
+.badge{padding:4px 10px;border-radius:12px;font-size:11px;font-weight:600;text-transform:uppercase}
+.badge.ok{background:rgba(102,187,106,.15);color:var(--success)}
+.badge.warn{background:rgba(255,167,38,.15);color:var(--warn)}
+.badge.err{background:rgba(239,83,80,.15);color:var(--danger)}
+.content{flex:1;overflow-y:auto;padding:24px}
+.menu-btn{display:none;background:none;border:none;color:var(--text);font-size:24px;cursor:pointer;padding:4px}
+
+/* Cards */
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px}
+.card{background:var(--card);border-radius:var(--radius);padding:20px;box-shadow:var(--shadow);border:1px solid var(--border)}
+.card h3{font-size:14px;font-weight:500;color:var(--text2);margin-bottom:12px;text-transform:uppercase;letter-spacing:.5px}
+.stat{font-size:28px;font-weight:600}
+.stat small{font-size:14px;color:var(--text2);font-weight:400}
+
+/* Device cards */
+.dev-card{background:var(--card);border-radius:var(--radius);padding:16px;box-shadow:var(--shadow);border:1px solid var(--border);display:flex;flex-direction:column;gap:12px}
+.dev-header{display:flex;align-items:center;gap:10px}
+.dev-icon{width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:18px}
+.dev-icon.light{background:rgba(255,235,59,.12);color:#ffeb3b}
+.dev-icon.sensor{background:rgba(3,169,244,.12);color:var(--accent)}
+.dev-icon.switch{background:rgba(102,187,106,.12);color:var(--success)}
+.dev-icon.unknown{background:rgba(155,155,155,.12);color:var(--text2)}
+.dev-info{flex:1;min-width:0}
+.dev-name{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
+.dev-name:hover{color:var(--primary)}
+.dev-addr{font-size:11px;color:var(--text2);font-family:monospace}
+.dev-values{display:flex;flex-wrap:wrap;gap:8px}
+.dev-val{padding:4px 8px;background:rgba(255,255,255,.05);border-radius:6px;font-size:13px}
+.dev-val span{color:var(--text2);margin-right:4px}
+.dev-actions{display:flex;gap:8px;align-items:center}
+.dev-seen{font-size:11px;color:var(--text2);flex:1}
+
+/* Toggle switch */
+.toggle{position:relative;width:44px;height:24px;cursor:pointer}
+.toggle input{display:none}
+.toggle .slider{position:absolute;inset:0;background:#555;border-radius:12px;transition:.2s}
+.toggle .slider:before{content:'';position:absolute;width:18px;height:18px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.2s}
+.toggle input:checked+.slider{background:var(--accent)}
+.toggle input:checked+.slider:before{transform:translateX(20px)}
+
+/* Buttons */
+.btn{padding:8px 16px;border:none;border-radius:8px;cursor:pointer;font-size:13px;font-weight:500;transition:.15s;display:inline-flex;align-items:center;gap:6px}
+.btn-primary{background:var(--accent);color:#fff}
+.btn-primary:hover{background:#0288d1}
+.btn-danger{background:var(--danger);color:#fff}
+.btn-danger:hover{background:#d32f2f}
+.btn-sm{padding:4px 10px;font-size:12px}
+.btn-outline{background:transparent;border:1px solid var(--border);color:var(--text)}
+.btn-outline:hover{background:rgba(255,255,255,.05)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+
+/* Permit join banner */
+.pj-banner{display:flex;align-items:center;gap:12px;padding:12px 16px;background:rgba(3,169,244,.1);border:1px solid rgba(3,169,244,.3);border-radius:var(--radius);margin-bottom:16px}
+.pj-banner .pulse{width:10px;height:10px;border-radius:50%;background:var(--accent);animation:pulse 1s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+
+/* Forms */
+.form-group{margin-bottom:16px}
+.form-group label{display:block;margin-bottom:6px;color:var(--text2);font-size:13px}
+.form-group input,.form-group select{width:100%;padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:14px;outline:none}
+.form-group input:focus{border-color:var(--accent)}
+
+/* Table */
+.table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.table{width:100%;border-collapse:collapse}
+.table th,.table td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap}
+.table th{color:var(--text2);font-weight:500;font-size:12px;text-transform:uppercase}
+.table td{font-size:13px}
+.card.full-width{grid-column:1/-1}
+
+/* Empty state */
+.empty{text-align:center;padding:60px 20px;color:var(--text2)}
+.empty svg{width:48px;height:48px;fill:var(--text2);margin-bottom:16px}
+.empty p{margin-bottom:16px}
+
+/* Toast */
+.toast{position:fixed;bottom:20px;right:20px;padding:12px 20px;background:#333;color:#fff;border-radius:8px;z-index:100;animation:fadeIn .3s}
+.toast.success{background:#2e7d32}
+.toast.error{background:#c62828}
+@keyframes fadeIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+
+/* Log viewer */
+.log-box{background:#0d1117;border:1px solid var(--border);border-radius:8px;padding:12px;font-family:'Cascadia Code','Fira Code',monospace;font-size:12px;line-height:1.6;white-space:pre-wrap;word-break:break-all;overflow-y:auto;max-height:calc(100vh - 200px);color:#c9d1d9}
+.log-box .W{color:#ffa726}
+.log-box .E{color:#ef5350}
+.log-box .I{color:#66bb6a}
+.log-toolbar{display:flex;gap:8px;margin-bottom:12px;align-items:center}
+.log-toolbar label{color:var(--text2);font-size:13px}
+
+/* Responsive */
+@media(max-width:768px){
+  .sidebar{position:fixed;left:-240px;top:0;bottom:0;transition:.3s;box-shadow:none}
+  .sidebar.open{left:0;box-shadow:4px 0 20px rgba(0,0,0,.5)}
+  .menu-btn{display:block}
+  .overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9}
+  .overlay.show{display:block}
+  .content{padding:16px}
+  .cards{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+<div class="overlay" id="overlay" onclick="toggleMenu()"></div>
+<div class="app">
+  <aside class="sidebar" id="sidebar">
+    <div class="logo">
+      <svg viewBox="0 0 24 24"><path d="M12 2L2 7v10l10 5 10-5V7L12 2zm0 2.18L19.25 7.5 12 11.82 4.75 7.5 12 4.18zM4 8.82l7 3.5V19l-7-3.5V8.82zm9 10.18v-6.68l7-3.5V15.5l-7 3.5z"/></svg>
+      <span>Zigbee Gateway</span>
+    </div>
+    <nav>
+      <a href="#overview" class="active" onclick="navigate('overview')">
+        <svg viewBox="0 0 24 24"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
+        <span>Overview</span>
+      </a>
+      <a href="#devices" onclick="navigate('devices')">
+        <svg viewBox="0 0 24 24"><path d="M9 21c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-1H9v1zm3-19C8.14 2 5 5.14 5 9c0 2.38 1.19 4.47 3 5.74V17c0 .55.45 1 1 1h6c.55 0 1-.45 1-1v-2.26c1.81-1.27 3-3.36 3-5.74 0-3.86-3.14-7-7-7z"/></svg>
+        <span>Devices</span>
+      </a>
+      <a href="#network" onclick="navigate('network')">
+        <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/></svg>
+        <span>Network</span>
+      </a>
+      <a href="#settings" onclick="navigate('settings')">
+        <svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.49.49 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 00-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
+        <span>Settings</span>
+      </a>
+      <a href="#logs" onclick="navigate('logs')">
+        <svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z"/></svg>
+        <span>Logs</span>
+      </a>
+      <a href="#definitions" onclick="navigate('definitions')">
+        <svg viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm-1 7V3.5L18.5 9H13zM6 20V4h5v7h7v9H6z"/></svg>
+        <span>Definitions</span>
+      </a>
+    </nav>
+    <div class="version">Zigbee Gateway v1.0</div>
+  </aside>
+
+  <div class="main">
+    <div class="topbar">
+      <button class="menu-btn" onclick="toggleMenu()">&#9776;</button>
+      <h1 id="pageTitle">Overview</h1>
+      <div class="badges">
+        <span class="badge" id="badgeWifi">WiFi</span>
+        <span class="badge" id="badgeZb">Zigbee</span>
+      </div>
+    </div>
+    <div class="content" id="content"></div>
+  </div>
+</div>
+
+<script>
+/* ── State ─────────────────────────────────────────────── */
+let S={status:null,devices:[],page:'overview'};
+let pjServerValue=0,pjServerTime=0,pjDisplay=0;
+
+/* HTML escape to prevent XSS */
+function esc(s){if(!s)return'';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
+
+/* ── Auth ──────────────────────────────────────────────── */
+function getAuthPw(){return localStorage.getItem('gw_pw')||'';}
+function setAuthPw(pw){localStorage.setItem('gw_pw',pw);}
+function authHeaders(){
+  const pw=getAuthPw();
+  if(!pw)return{};
+  return{'Authorization':'Basic '+btoa('admin:'+pw)};
+}
+
+/* ── API ───────────────────────────────────────────────── */
+async function api(path,opts){
+  try{
+    opts=opts||{};
+    opts.headers=Object.assign({},opts.headers||{},authHeaders());
+    let r=await fetch('/api/'+path,opts);
+    if(r.status===401){
+      const pw=prompt('Enter gateway password:');
+      if(pw===null)return null;
+      setAuthPw(pw);
+      opts.headers=Object.assign({},opts.headers,authHeaders());
+      r=await fetch('/api/'+path,opts);
+      if(r.status===401){toast('Wrong password','error');return null;}
+    }
+    return await r.json();
+  }catch(e){toast(e.message,'error');return null;}
+}
+const getStatus=()=>api('status');
+const getDevices=()=>api('devices');
+const permitJoin=(d)=>api('permit_join',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({duration:d})});
+const deviceCmd=(addr,ep,cmd)=>api('device/cmd',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({addr,endpoint:ep,cmd})});
+const deviceRename=(addr,name)=>api('device/rename',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({addr,name})});
+const deviceRemove=(addr)=>api('device/remove',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({addr})});
+const saveWifi=(ssid,password)=>api('settings/wifi',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid,password})});
+const restart=()=>api('system/restart',{method:'POST'});
+
+/* ── Poll (HTTP fallback) ──────────────────────────────── */
+async function poll(){
+  const[st,dv]=await Promise.all([getStatus(),getDevices()]);
+  if(st){
+    const r=st.zigbee.permit_join_remaining||0;
+    if(r!==pjServerValue){pjServerValue=r;pjServerTime=Date.now();}
+    S.status=st;
+  }
+  if(dv)S.devices=dv;
+  updateBadges();render();
+}
+
+/* ── WebSocket ─────────────────────────────────────────── */
+let ws=null,wsRetryMs=1000,wsLastOpen=0;
+function shouldRender(){const ae=document.activeElement;return!(ae&&(ae.tagName==='INPUT'||ae.tagName==='SELECT'||ae.tagName==='TEXTAREA'));}
+function wsConnect(){
+  const proto=location.protocol==='https:'?'wss:':'ws:';
+  ws=new WebSocket(proto+'//'+location.host+'/ws');
+  ws.onopen=()=>{wsRetryMs=1000;wsLastOpen=Date.now();};
+  ws.onmessage=(evt)=>{
+    let msg;try{msg=JSON.parse(evt.data);}catch(e){return;}
+    switch(msg.type){
+    case 'status':{
+      const r=msg.data.zigbee.permit_join_remaining||0;
+      if(r!==pjServerValue){pjServerValue=r;pjServerTime=Date.now();}
+      S.status=msg.data;updateBadges();if(shouldRender())render();break;
+    }
+    case 'devices':S.devices=msg.data;if(shouldRender())render();break;
+    case 'device_update':{
+      const upd=msg.data;const idx=S.devices.findIndex(d=>d.addr===upd.addr);
+      if(idx>=0)S.devices[idx]=upd;else S.devices.push(upd);
+      if(shouldRender())render();break;
+    }
+    case 'device_remove':S.devices=S.devices.filter(d=>d.addr!==msg.data.addr);if(shouldRender())render();break;
+    case 'permit_join':
+      pjServerValue=msg.data.remaining;pjServerTime=Date.now();
+      if(S.status){S.status.zigbee.permit_join=msg.data.active;S.status.zigbee.permit_join_remaining=msg.data.remaining;}
+      if(shouldRender())render();break;
+    case 'log':{
+      const box=document.getElementById('logBox');
+      if(box){
+        let raw=(box.dataset.raw||'')+msg.data;
+        if(raw.length>200000)raw=raw.slice(-150000);
+        box.dataset.raw=raw;
+        applyLogFilter();
+      }
+      break;
+    }
+    }
+  };
+  ws.onclose=()=>{ws=null;setTimeout(wsConnect,wsRetryMs);wsRetryMs=Math.min(wsRetryMs*2,30000);};
+  ws.onerror=()=>ws.close();
+}
+wsConnect();
+
+/* 1-second timer: permit join countdown + HTTP fallback */
+setInterval(()=>{
+  if(!pjServerValue){pjDisplay=0;}else{
+    const elapsed=Math.floor((Date.now()-pjServerTime)/1000);
+    pjDisplay=Math.max(0,pjServerValue-elapsed);
+  }
+  document.querySelectorAll('[data-pj-countdown]').forEach(el=>{
+    if(el.textContent!==String(pjDisplay))el.textContent=pjDisplay;
+  });
+  if(!ws||ws.readyState!==WebSocket.OPEN){
+    if(Date.now()-wsLastOpen>10000)poll();
+  }
+},1000);
+
+function updateBadges(){
+  const bw=document.getElementById('badgeWifi');
+  const bz=document.getElementById('badgeZb');
+  if(!S.status)return;
+  const wst=S.status.wifi.state;
+  bw.textContent=wst==='connected'?'WiFi: '+S.status.wifi.ip:wst==='ap'?'AP Mode':'WiFi...';
+  bw.className='badge '+(wst==='connected'?'ok':wst==='ap'?'warn':'err');
+  bz.textContent=S.status.zigbee.running?'Zigbee: CH'+S.status.zigbee.channel:'Zigbee...';
+  bz.className='badge '+(S.status.zigbee.running?'ok':'warn');
+}
+
+/* ── Navigation ────────────────────────────────────────── */
+function navigate(page){
+  S.page=page;
+  document.querySelectorAll('.sidebar nav a').forEach(a=>{
+    a.classList.toggle('active',a.getAttribute('href')==='#'+page);
+  });
+  document.getElementById('pageTitle').textContent=
+    {overview:'Overview',devices:'Devices',network:'Network',settings:'Settings',logs:'Logs',definitions:'Definitions'}[page];
+  render();
+  if(page==='logs')refreshLogs();
+  if(page==='definitions')setTimeout(loadDefs,50);
+  if(window.innerWidth<=768)toggleMenu();
+}
+
+function toggleMenu(){
+  document.getElementById('sidebar').classList.toggle('open');
+  document.getElementById('overlay').classList.toggle('show');
+}
+
+/* Handle hash navigation */
+window.addEventListener('hashchange',()=>{
+  const h=location.hash.slice(1);
+  if(h)navigate(h);
+});
+if(location.hash)navigate(location.hash.slice(1));
+
+/* ── Toast ─────────────────────────────────────────────── */
+function toast(msg,type='success'){
+  const t=document.createElement('div');
+  t.className='toast '+type;
+  t.textContent=msg;
+  document.body.appendChild(t);
+  setTimeout(()=>t.remove(),3000);
+}
+
+/* ── Render ────────────────────────────────────────────── */
+function render(){
+  const c=document.getElementById('content');
+  switch(S.page){
+    case 'overview':c.innerHTML=renderOverview();break;
+    case 'devices':c.innerHTML=renderDevices();break;
+    case 'network':c.innerHTML=renderNetwork();break;
+    case 'settings':c.innerHTML=renderSettings();break;
+    case 'logs':if(!document.getElementById('logBox'))c.innerHTML=renderLogs();break;
+    case 'definitions':c.innerHTML=renderDefinitions();break;
+  }
+}
+
+/* ── Helpers ───────────────────────────────────────────── */
+function fmtTime(sec){
+  if(sec<0)return'Unknown';
+  if(sec<60)return sec+'s ago';
+  if(sec<3600)return Math.floor(sec/60)+'m ago';
+  if(sec<86400)return Math.floor(sec/3600)+'h ago';
+  return Math.floor(sec/86400)+'d ago';
+}
+function fmtUptime(s){
+  const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
+  return(d?d+'d ':'')+(h?h+'h ':'')+(m+'m');
+}
+function devType(ep){
+  if(ep.on_off!==undefined)return ep.temperature!==undefined?'sensor':'light';
+  if(ep.temperature!==undefined||ep.humidity!==undefined)return'sensor';
+  return'unknown';
+}
+function devIcon(type){
+  switch(type){
+    case'light':return{cls:'light',ico:'&#x1F4A1;'};
+    case'sensor':return{cls:'sensor',ico:'&#x1F321;'};
+    case'switch':return{cls:'switch',ico:'&#x26A1;'};
+    default:return{cls:'unknown',ico:'&#x2753;'};
+  }
+}
+
+/* ── Overview page ─────────────────────────────────────── */
+function renderOverview(){
+  if(!S.status)return'<div class="empty"><p>Loading...</p></div>';
+  const zb=S.status.zigbee;
+  const sys=S.status.system;
+  let pjBanner='';
+  if(zb.permit_join){
+    pjBanner=`<div class="pj-banner"><div class="pulse"></div><span>Network open for joining (<span data-pj-countdown>${pjDisplay}</span>s remaining)</span></div>`;
+  }
+  return pjBanner+`<div class="cards">
+    <div class="card"><h3>Devices</h3><div class="stat">${zb.devices}<small> paired</small></div></div>
+    <div class="card"><h3>Network</h3><div class="stat">CH ${zb.channel}<small> &middot; PAN ${zb.pan_id}</small></div></div>
+    <div class="card"><h3>Uptime</h3><div class="stat">${fmtUptime(sys.uptime)}</div></div>
+    <div class="card"><h3>Memory</h3><div class="stat">${Math.round(sys.heap/1024)}<small> KB free</small></div></div>
+  </div>
+  <h2 style="margin:24px 0 16px;font-size:16px;font-weight:500">Recent Devices</h2>
+  <div class="cards">${S.devices.slice(0,6).map(d=>renderDeviceCard(d)).join('')}</div>`;
+}
+
+/* ── Devices page ──────────────────────────────────────── */
+function renderDevices(){
+  if(!S.status)return'';
+  const zb=S.status.zigbee;
+  let pjBanner='';
+  if(zb.permit_join){
+    pjBanner=`<div class="pj-banner"><div class="pulse"></div><span>Pairing mode (<span data-pj-countdown>${pjDisplay}</span>s)</span>
+      <button class="btn btn-sm btn-outline" onclick="doPermitJoin(0)">Stop</button></div>`;
+  }else{
+    pjBanner=`<div style="margin-bottom:16px"><button class="btn btn-primary" onclick="doPermitJoin(120)">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+      Add Device</button></div>`;
+  }
+  if(!S.devices.length){
+    return pjBanner+`<div class="empty">
+      <svg viewBox="0 0 24 24"><path d="M9 21c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-1H9v1zm3-19C8.14 2 5 5.14 5 9c0 2.38 1.19 4.47 3 5.74V17c0 .55.45 1 1 1h6c.55 0 1-.45 1-1v-2.26c1.81-1.27 3-3.36 3-5.74 0-3.86-3.14-7-7-7z"/></svg>
+      <p>No devices paired yet</p>
+      <button class="btn btn-primary" onclick="doPermitJoin(120)">Start Pairing</button></div>`;
+  }
+  return pjBanner+`<div class="cards">${S.devices.map(d=>renderDeviceCard(d)).join('')}</div>`;
+}
+
+function renderDeviceCard(d){
+  let type='unknown';
+  let values=[];
+  let toggleHtml='';
+
+  if(d.endpoints&&d.endpoints.length){
+    const ep=d.endpoints[0];
+    type=devType(ep);
+    if(ep.on_off!==undefined){
+      toggleHtml=`<label class="toggle"><input type="checkbox" ${ep.on_off?'checked':''} onchange="doToggle('${d.addr}',${ep.id},this.checked)"><span class="slider"></span></label>`;
+    }
+    if(ep.temperature!==undefined)values.push(`<div class="dev-val"><span>Temp</span>${ep.temperature.toFixed(1)}&deg;C</div>`);
+    if(ep.humidity!==undefined)values.push(`<div class="dev-val"><span>Hum</span>${ep.humidity.toFixed(1)}%</div>`);
+    if(ep.pressure!==undefined)values.push(`<div class="dev-val"><span>Press</span>${ep.pressure} hPa</div>`);
+    if(ep.illuminance!==undefined)values.push(`<div class="dev-val"><span>Lux</span>${ep.illuminance}</div>`);
+    if(ep.occupancy!==undefined)values.push(`<div class="dev-val"><span>Occ</span>${ep.occupancy?'Yes':'No'}</div>`);
+    if(ep.level!==undefined&&ep.on_off!==undefined)values.push(`<div class="dev-val"><span>Level</span>${Math.round(ep.level/255*100)}%</div>`);
+  }
+
+  const ic=devIcon(type);
+  return`<div class="dev-card">
+    <div class="dev-header">
+      <div class="dev-icon ${ic.cls}">${ic.ico}</div>
+      <div class="dev-info">
+        <div class="dev-name" onclick="doRename('${d.addr}','${esc(d.name).replace(/'/g,"\\'")}')" title="Click to rename">${esc(d.name)}</div>
+        <div class="dev-addr">${d.addr} &middot; ${d.ieee}${d.manufacturer||d.model?' &middot; '+esc(d.manufacturer||'')+' '+esc(d.model||''):''}</div>
+      </div>
+      ${toggleHtml}
+    </div>
+    ${values.length?'<div class="dev-values">'+values.join('')+'</div>':''}
+    <div class="dev-actions">
+      <span class="dev-seen">${fmtTime(d.last_seen_sec_ago)}</span>
+      <button class="btn btn-sm btn-outline btn-danger" onclick="doRemove('${d.addr}','${esc(d.name).replace(/'/g,"\\'")}')">Remove</button>
+    </div>
+  </div>`;
+}
+
+/* ── Network page ──────────────────────────────────────── */
+function renderNetwork(){
+  if(!S.status)return'';
+  const zb=S.status.zigbee;
+  let pj='';
+  if(zb.permit_join){
+    pj=`<div class="pj-banner"><div class="pulse"></div><span>Network open (<span data-pj-countdown>${pjDisplay}</span>s)</span>
+      <button class="btn btn-sm btn-outline" onclick="doPermitJoin(0)">Close</button></div>`;
+  }
+  return`${pj}
+  <div class="cards">
+    <div class="card">
+      <h3>Zigbee Network</h3>
+      <table class="table">
+        <tr><td>Status</td><td>${zb.running?'<span style="color:var(--success)">Running</span>':'Stopped'}</td></tr>
+        <tr><td>Channel</td><td>${zb.channel}</td></tr>
+        <tr><td>PAN ID</td><td>${zb.pan_id}</td></tr>
+        <tr><td>Devices</td><td>${zb.devices}</td></tr>
+        <tr><td>Permit Join</td><td>${zb.permit_join?'Open (<span data-pj-countdown>'+pjDisplay+'</span>s)':'Closed'}</td></tr>
+      </table>
+      <div style="margin-top:16px;display:flex;gap:8px">
+        <button class="btn btn-primary" onclick="doPermitJoin(${zb.permit_join?0:120})">${zb.permit_join?'Close Network':'Open Network (120s)'}</button>
+      </div>
+    </div>
+    <div class="card full-width">
+      <h3>Device Table</h3>
+      ${S.devices.length?`<div class="table-wrap"><table class="table">
+        <thead><tr><th>Address</th><th>IEEE</th><th>Name</th><th>Manufacturer</th><th>Model</th><th>Endpoints</th><th>Last Seen</th></tr></thead>
+        <tbody>${S.devices.map(d=>`<tr>
+          <td style="font-family:monospace">${d.addr}</td>
+          <td style="font-family:monospace;font-size:11px">${d.ieee}</td>
+          <td>${esc(d.name)}</td>
+          <td>${esc(d.manufacturer)||'-'}</td>
+          <td>${esc(d.model)||'-'}</td>
+          <td>${d.endpoints?d.endpoints.map(e=>e.id).join(', '):'-'}</td>
+          <td>${fmtTime(d.last_seen_sec_ago)}</td>
+        </tr>`).join('')}</tbody>
+      </table></div>`:'<p style="color:var(--text2);padding:16px">No devices</p>'}
+    </div>
+  </div>`;
+}
+
+/* ── Settings page ─────────────────────────────────────── */
+function renderSettings(){
+  if(!S.status)return'';
+  const w=S.status.wifi;
+  const zb=S.status.zigbee;
+  let chOpts='<option value="0">Auto</option>';
+  for(let i=11;i<=26;i++)chOpts+=`<option value="${i}" ${zb.channel===i?'selected':''}>Channel ${i}${i===15||i===20||i===25?' (recommended)':''}</option>`;
+  return`<div class="cards">
+    <div class="card">
+      <h3>WiFi Configuration</h3>
+      <div class="form-group"><label>Current Status</label>
+        <div style="padding:8px 0">${w.state==='connected'?'Connected to <b>'+esc(w.ssid)+'</b> ('+esc(w.ip)+')':w.state==='ap'?'AP Mode (192.168.4.1)':'Disconnected'}</div>
+      </div>
+      <div class="form-group"><label>SSID</label><input id="wifiSsid" type="text" placeholder="WiFi network name" value="${w.state==='connected'?esc(w.ssid):''}"></div>
+      <div class="form-group"><label>Password</label><input id="wifiPass" type="password" placeholder="WiFi password"></div>
+      <button class="btn btn-primary" onclick="doSaveWifi()">Save &amp; Restart</button>
+    </div>
+    <div class="card">
+      <h3>Zigbee Channel</h3>
+      <p style="color:var(--text2);margin-bottom:12px">Current channel: <b>${zb.channel}</b>. Changing the channel will reset the Zigbee network. All devices will need to be re-paired.</p>
+      <div class="form-group"><label>Channel</label><select id="zbChannel">${chOpts}</select></div>
+      <button class="btn btn-primary" onclick="doChangeChannel()">Change Channel</button>
+    </div>
+    <div class="card">
+      <h3>Firmware Update (OTA)</h3>
+      <p style="color:var(--text2);margin-bottom:12px">Upload a new zigbee-gateway.bin to update the gateway firmware over the air.</p>
+      <div class="form-group"><label>Firmware File (.bin)</label><input id="otaFile" type="file" accept=".bin"></div>
+      <div id="otaProgress" style="display:none;margin-bottom:12px">
+        <div style="background:var(--border);border-radius:4px;overflow:hidden;height:6px">
+          <div id="otaBar" style="width:0%;height:100%;background:var(--accent);transition:width .3s"></div>
+        </div>
+        <span id="otaText" style="font-size:12px;color:var(--text2)">Uploading...</span>
+      </div>
+      <button class="btn btn-primary" id="otaBtn" onclick="doOtaUpload()">Upload &amp; Flash</button>
+    </div>
+    <div class="card">
+      <h3>System Information</h3>
+      <div class="table-wrap"><table class="table">
+        <tr><td>Firmware</td><td>${S.status.system.firmware||'unknown'}</td></tr>
+        <tr><td>Uptime</td><td>${fmtUptime(S.status.system.uptime)}</td></tr>
+        <tr><td>Free Heap</td><td>${Math.round(S.status.system.heap/1024)} KB</td></tr>
+        <tr><td>WiFi RSSI</td><td>${w.rssi} dBm</td></tr>
+      </table></div>
+      <div style="margin-top:16px;display:flex;gap:8px">
+        <button class="btn btn-danger" onclick="doRestart()">Restart Gateway</button>
+        <button class="btn btn-danger" onclick="doFactoryReset()">Zigbee Factory Reset</button>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Admin Password</h3>
+      <p style="color:var(--text2);margin-bottom:12px">Change the password used for HTTP authentication. Username is always <b>admin</b>.</p>
+      <div class="form-group"><label>New Password</label><input id="newPassword" type="password" placeholder="New password"></div>
+      <button class="btn btn-primary" onclick="doChangePassword()">Change Password</button>
+    </div>
+    <div class="card">
+      <h3>RCP Firmware (ESP32-H2)</h3>
+      <p style="color:var(--text2);margin-bottom:12px">The ESP32-H2 radio co-processor runs the Zigbee RCP firmware.
+        Auto-update flashes H2 on boot when a new firmware is embedded in the build.</p>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-outline" onclick="doRcpReflash()">Re-flash RCP</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+/* ── Logs page ─────────────────────────────────────────── */
+let logAutoScroll=true;
+let logFilter='';
+function renderLogs(){
+  return`<div class="log-toolbar">
+    <button class="btn btn-sm btn-primary" onclick="refreshLogs()">Refresh</button>
+    <button class="btn btn-sm btn-outline" id="autoScrollBtn" onclick="toggleAutoScroll()">${logAutoScroll?'Auto-scroll: ON':'Auto-scroll: OFF'}</button>
+    <input type="text" id="logFilterInput" placeholder="Filter..." value="${logFilter}" oninput="logFilter=this.value;applyLogFilter()" style="padding:4px 8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;width:200px">
+  </div>
+  <div class="log-box" id="logBox">Loading logs...</div>`;
+}
+function toggleAutoScroll(){logAutoScroll=!logAutoScroll;const b=document.getElementById('autoScrollBtn');if(b)b.textContent='Auto-scroll: '+(logAutoScroll?'ON':'OFF');}
+function colorizeLog(text){
+  return text.replace(/^(.*?\s)(E)\s(\(.*)/gm,'<span class="E">$1E $3</span>')
+             .replace(/^(.*?\s)(W)\s(\(.*)/gm,'<span class="W">$1W $3</span>')
+             .replace(/^(.*?\s)(I)\s(\(.*)/gm,'<span class="I">$1I $3</span>');
+}
+function applyLogFilter(){
+  const box=document.getElementById('logBox');
+  if(!box||!box.dataset.raw)return;
+  let lines=box.dataset.raw;
+  if(logFilter){
+    lines=lines.split('\n').filter(l=>l.toLowerCase().includes(logFilter.toLowerCase())).join('\n');
+  }
+  const html=colorizeLog(lines.replace(/</g,'&lt;').replace(/>/g,'&gt;'));
+  if(box.innerHTML!==html){
+    const wasAtBottom=box.scrollTop+box.clientHeight>=box.scrollHeight-20;
+    box.innerHTML=html;
+    if(logAutoScroll&&wasAtBottom)box.scrollTop=box.scrollHeight;
+  }
+}
+async function refreshLogs(){
+  try{
+    const r=await fetch('/api/logs');
+    const text=await r.text();
+    const box=document.getElementById('logBox');
+    if(box&&box.dataset.raw!==text){
+      box.dataset.raw=text;
+      applyLogFilter();
+    }
+  }catch(e){}
+}
+/* Logs auto-refresh via WebSocket push; manual refresh still available */
+
+/* ── Actions ───────────────────────────────────────────── */
+async function doPermitJoin(d){
+  const r=await permitJoin(d);
+  if(r&&r.ok)toast(d?'Network open for '+d+'s':'Network closed');
+  poll();
+}
+async function doToggle(addr,ep,state){
+  await deviceCmd(addr,ep,state?'on':'off');
+}
+function doRename(addr,currentName){
+  const name=prompt('Rename device:',currentName);
+  if(name&&name!==currentName){
+    deviceRename(addr,name).then(r=>{if(r&&r.ok){toast('Renamed');poll();}});
+  }
+}
+function doRemove(addr,name){
+  if(confirm('Remove '+name+'?')){
+    deviceRemove(addr).then(r=>{if(r&&r.ok){toast('Removed');poll();}});
+  }
+}
+async function doSaveWifi(){
+  const ssid=document.getElementById('wifiSsid').value;
+  const pass=document.getElementById('wifiPass').value;
+  if(!ssid){toast('Enter SSID','error');return;}
+  const r=await saveWifi(ssid,pass);
+  if(r&&r.ok){
+    toast('WiFi saved! Restarting...');
+    setTimeout(()=>restart(),2000);
+  }
+}
+function doRestart(){
+  if(confirm('Restart the gateway?')){
+    restart();
+    toast('Restarting...');
+  }
+}
+function doFactoryReset(){
+  if(confirm('Factory reset Zigbee? All paired devices will be lost!')){
+    api('system/factory-reset',{method:'POST'});
+    toast('Factory reset, restarting...');
+  }
+}
+async function doChangeChannel(){
+  const sel=document.getElementById('zbChannel');
+  const ch=parseInt(sel.value);
+  const msg=ch===0?'Set channel to Auto? This will reset the Zigbee network and all devices will need to re-pair.'
+    :'Change to channel '+ch+'? This will reset the Zigbee network and all devices will need to re-pair.';
+  if(!confirm(msg))return;
+  toast('Changing channel...');
+  const r=await api('settings/zigbee',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({channel:ch})});
+  if(r&&r.ok)toast('Channel saved! Restarting...');
+  else toast(r?.error||'Failed','error');
+}
+async function doOtaUpload(){
+  const fileInput=document.getElementById('otaFile');
+  if(!fileInput.files.length){toast('Select a .bin file','error');return;}
+  const file=fileInput.files[0];
+  if(!file.name.endsWith('.bin')){toast('File must be .bin','error');return;}
+  if(!confirm('Upload '+file.name+' ('+Math.round(file.size/1024)+'KB) and flash? The gateway will restart.'))return;
+
+  const btn=document.getElementById('otaBtn');
+  const prog=document.getElementById('otaProgress');
+  const bar=document.getElementById('otaBar');
+  const txt=document.getElementById('otaText');
+  btn.disabled=true;
+  prog.style.display='block';
+
+  try{
+    const xhr=new XMLHttpRequest();
+    xhr.open('POST','/api/ota');
+    xhr.setRequestHeader('Content-Type','application/octet-stream');
+    const ah=authHeaders();if(ah.Authorization)xhr.setRequestHeader('Authorization',ah.Authorization);
+    xhr.upload.onprogress=function(e){
+      if(e.lengthComputable){
+        const pct=Math.round(e.loaded/e.total*100);
+        bar.style.width=pct+'%';
+        txt.textContent='Uploading... '+pct+'%';
+      }
+    };
+    xhr.onload=function(){
+      if(xhr.status===200){
+        bar.style.width='100%';
+        txt.textContent='Flashing complete! Restarting...';
+        toast('Firmware updated! Restarting...');
+      }else{
+        try{const r=JSON.parse(xhr.responseText);toast(r.error||'Upload failed','error');}
+        catch(e){toast('Upload failed','error');}
+        btn.disabled=false;
+        prog.style.display='none';
+      }
+    };
+    xhr.onerror=function(){
+      toast('Upload failed — connection lost','error');
+      btn.disabled=false;
+      prog.style.display='none';
+    };
+    xhr.send(file);
+  }catch(e){
+    toast(e.message,'error');
+    btn.disabled=false;
+    prog.style.display='none';
+  }
+}
+/* ── Definitions page ──────────────────────────────────── */
+function renderDefinitions(){
+  return`<div class="cards">
+    <div class="card full-width">
+      <h3>Device Definitions</h3>
+      <p style="color:var(--text2);margin-bottom:12px">JSON mapping manufacturer+model to clusters that need binding. Outer key = manufacturer, inner key = model, "bind" maps endpoint to cluster list.</p>
+      <textarea id="defsEditor" style="width:100%;height:300px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:12px;font-family:'Cascadia Code','Fira Code',monospace;font-size:13px;resize:vertical" placeholder="Loading..."></textarea>
+      <div style="margin-top:12px;display:flex;gap:8px">
+        <button class="btn btn-primary" onclick="doSaveDefs()">Save</button>
+        <button class="btn btn-outline" onclick="loadDefs()">Reload</button>
+      </div>
+    </div>
+  </div>`;
+}
+async function loadDefs(){
+  try{
+    const r=await fetch('/api/defs',{headers:authHeaders()});
+    const text=await r.text();
+    const el=document.getElementById('defsEditor');
+    if(el){
+      try{el.value=JSON.stringify(JSON.parse(text),null,2);}
+      catch(e){el.value=text;}
+    }
+  }catch(e){toast('Failed to load definitions','error');}
+}
+async function doSaveDefs(){
+  const el=document.getElementById('defsEditor');
+  if(!el)return;
+  let json;
+  try{json=JSON.parse(el.value);}
+  catch(e){toast('Invalid JSON: '+e.message,'error');return;}
+  const body=JSON.stringify(json);
+  const res=await api('defs',{method:'POST',headers:{'Content-Type':'application/json'},body});
+  if(res&&res.ok)toast('Definitions saved');
+  else if(res)toast(res.error||'Save failed','error');
+}
+
+async function doChangePassword(){
+  const pw=document.getElementById('newPassword').value;
+  if(!pw){toast('Enter a password','error');return;}
+  const r=await api('settings/password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw})});
+  if(r&&r.ok){setAuthPw(pw);toast('Password changed');document.getElementById('newPassword').value='';}
+  else toast(r?.error||'Failed','error');
+}
+async function doRcpReflash(){
+  if(!confirm('Re-flash ESP32-H2 RCP firmware? Zigbee will be interrupted.'))return;
+  toast('Flashing RCP... this takes ~30s');
+  const r=await api('rcp/reflash',{method:'POST'});
+  if(r&&r.ok){toast('RCP re-flashed! Restarting...');setTimeout(()=>restart(),2000);}
+  else toast(r?.error||'RCP flash failed','error');
+}
+</script>
+</body>
+</html>
