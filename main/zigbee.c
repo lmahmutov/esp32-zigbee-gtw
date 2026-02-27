@@ -2,26 +2,20 @@
 #include "ws_server.h"
 #include "device_list.h"
 #include "device_defs.h"
+#include "automation.h"
 
 #include <string.h>
 #include <stdarg.h>
 #include "esp_log.h"
 #include "esp_timer.h"
-#include "esp_spiffs.h"
-#include "esp_rcp_update.h"
-#include "esp_zigbee_secur.h"
-#include "esp_zigbee_trace.h"
-#include "test/esp_zigbee_test_utils.h"
+#include "driver/gpio.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "esp_partition.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "ha/esp_zigbee_ha_standard.h"
-
-#if CONFIG_OPENTHREAD_SPINEL_ONLY
-#include "esp_radio_spinel.h"
-#endif
+#include "freertos/timers.h"
+#include "esp_zigbee_core.h"
 
 static const char *TAG = "zigbee";
 
@@ -31,7 +25,7 @@ static const char *TAG = "zigbee";
 static char    s_log_buf[LOG_BUF_SIZE];
 static size_t  s_log_head;
 static bool    s_log_wrapped;
-static portMUX_TYPE s_log_mux = portMUX_INITIALIZER_UNLOCKED;
+static SemaphoreHandle_t s_log_mutex;
 static vprintf_like_t s_orig_vprintf;
 static volatile bool s_log_in_hook;
 
@@ -55,16 +49,24 @@ static int log_vprintf_hook(const char *fmt, va_list args)
     if (len <= 0) { s_log_in_hook = false; return ret; }
     if (len >= (int)sizeof(tmp)) len = sizeof(tmp) - 1;
 
-    portENTER_CRITICAL_SAFE(&s_log_mux);
-    size_t old_head = s_log_head;
-    for (int i = 0; i < len; i++) {
-        s_log_buf[s_log_head] = tmp[i];
-        s_log_head = (s_log_head + 1) % LOG_BUF_SIZE;
+    /* Use mutex instead of spinlock — does NOT disable interrupts,
+       so NCP UART RX is not disrupted during log bursts */
+    if (xSemaphoreTake(s_log_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        size_t old_head = s_log_head;
+        /* memcpy in up to two chunks (wrap around ring buffer) */
+        size_t first = LOG_BUF_SIZE - s_log_head;
+        if ((size_t)len <= first) {
+            memcpy(s_log_buf + s_log_head, tmp, len);
+        } else {
+            memcpy(s_log_buf + s_log_head, tmp, first);
+            memcpy(s_log_buf, tmp + first, len - first);
+        }
+        s_log_head = (s_log_head + len) % LOG_BUF_SIZE;
+        if (old_head + (size_t)len >= LOG_BUF_SIZE) {
+            s_log_wrapped = true;
+        }
+        xSemaphoreGive(s_log_mutex);
     }
-    if (old_head + (size_t)len >= LOG_BUF_SIZE) {
-        s_log_wrapped = true;
-    }
-    portEXIT_CRITICAL_SAFE(&s_log_mux);
 
     ws_notify_log(tmp, len);
 
@@ -76,22 +78,36 @@ size_t zigbee_get_log(char *out, size_t max_len)
 {
     if (max_len == 0) return 0;
 
-    portENTER_CRITICAL_SAFE(&s_log_mux);
+    if (xSemaphoreTake(s_log_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+        out[0] = '\0';
+        return 0;
+    }
+
     size_t total = 0;
     size_t start = s_log_wrapped ? s_log_head : 0;
     size_t end   = s_log_head;
 
     if (s_log_wrapped) {
-        /* Copy from start..end of buffer, then 0..head */
-        for (size_t i = start; i < LOG_BUF_SIZE && total < max_len - 1; i++)
-            out[total++] = s_log_buf[i];
-        for (size_t i = 0; i < end && total < max_len - 1; i++)
-            out[total++] = s_log_buf[i];
+        /* Copy from head..end of buffer, then 0..head using memcpy */
+        size_t chunk1 = LOG_BUF_SIZE - start;
+        if (chunk1 > max_len - 1) chunk1 = max_len - 1;
+        memcpy(out, s_log_buf + start, chunk1);
+        total = chunk1;
+
+        size_t chunk2 = end;
+        if (chunk2 > max_len - 1 - total) chunk2 = max_len - 1 - total;
+        if (chunk2 > 0) {
+            memcpy(out + total, s_log_buf, chunk2);
+            total += chunk2;
+        }
     } else {
-        for (size_t i = 0; i < end && total < max_len - 1; i++)
-            out[total++] = s_log_buf[i];
+        size_t chunk = end;
+        if (chunk > max_len - 1) chunk = max_len - 1;
+        memcpy(out, s_log_buf, chunk);
+        total = chunk;
     }
-    portEXIT_CRITICAL_SAFE(&s_log_mux);
+
+    xSemaphoreGive(s_log_mutex);
     out[total] = '\0';
     return total;
 }
@@ -104,48 +120,6 @@ static volatile uint8_t  s_permit_remain;
 static volatile uint16_t s_pan_id;
 static volatile uint8_t  s_channel;
 static volatile uint16_t s_short_addr;
-
-/* ── RCP error handler ─────────────────────────────────── */
-
-static void rcp_error_handler(void)
-{
-#if CONFIG_ZIGBEE_GW_AUTO_UPDATE_RCP
-    ESP_LOGW(TAG, "RCP error — re-flashing");
-    esp_zb_rcp_deinit();
-    if (esp_rcp_update() != ESP_OK) {
-        esp_rcp_mark_image_verified(false);
-    }
-#endif
-    esp_restart();
-}
-
-/* ── RCP version check + auto-update ──────────────────── */
-
-#if CONFIG_OPENTHREAD_SPINEL_ONLY && CONFIG_ZIGBEE_GW_AUTO_UPDATE_RCP
-static void rcp_auto_update(const char *running_version)
-{
-    char stored_version[RCP_VERSION_MAX_SIZE];
-    if (esp_rcp_load_version_in_storage(stored_version, sizeof(stored_version)) == ESP_OK) {
-        ESP_LOGI(TAG, "Running RCP: %s", running_version);
-        ESP_LOGI(TAG, "Storage RCP: %s", stored_version);
-        if (strcmp(stored_version, running_version) != 0) {
-            ESP_LOGW(TAG, "Version mismatch — updating RCP");
-            esp_zb_rcp_deinit();
-            if (esp_rcp_update() != ESP_OK) {
-                esp_rcp_mark_image_verified(false);
-            }
-            esp_restart();
-        } else {
-            ESP_LOGI(TAG, "RCP version matches");
-            esp_rcp_mark_image_verified(true);
-        }
-    } else {
-        ESP_LOGW(TAG, "No RCP image in storage, rebooting to try next image");
-        esp_rcp_mark_image_verified(false);
-        esp_restart();
-    }
-}
-#endif
 
 /* ── ZDO discovery helpers ─────────────────────────────── */
 
@@ -286,6 +260,10 @@ static void bind_cb(esp_zb_zdp_status_t status, void *user_ctx)
     bind_entry_t *e = (bind_entry_t *)user_ctx;
     if (status == ESP_ZB_ZDP_STATUS_SUCCESS) {
         ESP_LOGI(TAG, "Bind OK: 0x%04X EP%d cluster 0x%04X", e->short_addr, e->src_ep, e->cluster_id);
+        device_lock();
+        int idx = device_find(e->short_addr);
+        if (idx >= 0) device_get(idx)->bind_done = true;
+        device_unlock();
     } else {
         ESP_LOGW(TAG, "Bind FAIL (0x%02X): 0x%04X EP%d cluster 0x%04X",
                  status, e->short_addr, e->src_ep, e->cluster_id);
@@ -409,11 +387,13 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
 
     case ESP_ZB_BDB_SIGNAL_FORMATION:
         if (err_status == ESP_OK) {
-            s_pan_id  = esp_zb_get_pan_id();
-            s_channel = esp_zb_get_current_channel();
-            ESP_LOGI(TAG, "Network formed (PAN 0x%04X CH %d)", s_pan_id, s_channel);
+            s_running = true;
+            s_pan_id     = esp_zb_get_pan_id();
+            s_channel    = esp_zb_get_current_channel();
+            s_short_addr = esp_zb_get_short_address();
+            ESP_LOGI(TAG, "Network formed (PAN 0x%04X CH %d addr 0x%04X)", s_pan_id, s_channel, s_short_addr);
             ws_notify_status();
-            esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_NETWORK_STEERING);
+            esp_zb_bdb_open_network(180);
         } else {
             ESP_LOGW(TAG, "Formation failed, retrying...");
             esp_zb_scheduler_alarm((esp_zb_callback_t)bdb_start_top_level_commissioning_cb,
@@ -440,6 +420,16 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
         device_add(annce->device_short_addr, annce->ieee_addr);
         discover_device(annce->device_short_addr);
         ws_notify_devices();
+
+        /* Notify automation engine */
+        {
+            auto_event_t aevt = {
+                .type = AUTO_EVT_DEVICE_ANNOUNCE,
+                .short_addr = annce->device_short_addr,
+            };
+            memcpy(aevt.ieee, annce->ieee_addr, 8);
+            automation_dispatch_event(&aevt);
+        }
         break;
     }
 
@@ -459,6 +449,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
         }
         break;
 
+    case ESP_ZB_ZDO_SIGNAL_LEAVE:
     case ESP_ZB_ZDO_SIGNAL_LEAVE_INDICATION: {
         esp_zb_zdo_signal_leave_indication_params_t *leave =
             (esp_zb_zdo_signal_leave_indication_params_t *)esp_zb_app_signal_get_params(p_sg_p);
@@ -481,69 +472,34 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
         if (idx >= 0) {
             device_list_save_deferred();
             ws_notify_device_remove(left_addr);
-        }
-        break;
-    }
 
-    case ESP_ZB_NWK_SIGNAL_DEVICE_ASSOCIATED: {
-        esp_zb_nwk_signal_device_associated_params_t *assoc =
-            (esp_zb_nwk_signal_device_associated_params_t *)esp_zb_app_signal_get_params(p_sg_p);
-        if (!assoc) break;
-        ESP_LOGW(TAG, "Device ASSOCIATED (MAC level): IEEE:%02X:%02X:%02X:%02X:%02X:%02X:%02X:%02X",
-                 assoc->device_addr[7], assoc->device_addr[6],
-                 assoc->device_addr[5], assoc->device_addr[4],
-                 assoc->device_addr[3], assoc->device_addr[2],
-                 assoc->device_addr[1], assoc->device_addr[0]);
+            /* Notify automation engine */
+            auto_event_t aevt = {
+                .type = AUTO_EVT_DEVICE_LEFT,
+                .short_addr = left_addr,
+            };
+            memcpy(aevt.ieee, leave->device_addr, 8);
+            automation_dispatch_event(&aevt);
+        }
         break;
     }
 
     case ESP_ZB_ZDO_SIGNAL_DEVICE_UPDATE: {
         esp_zb_zdo_signal_device_update_params_t *upd =
             (esp_zb_zdo_signal_device_update_params_t *)esp_zb_app_signal_get_params(p_sg_p);
-        if (!upd) break;
-        const char *status_str = "unknown";
-        switch (upd->status) {
-            case 0: status_str = "secure_rejoin"; break;
-            case 1: status_str = "unsecure_join"; break;
-            case 2: status_str = "left"; break;
-            case 3: status_str = "tc_rejoin"; break;
+        if (upd) {
+            const char *st = "unknown";
+            switch (upd->status) {
+                case 0x00: st = "secured_rejoin"; break;
+                case 0x01: st = "unsecured_join"; break;
+                case 0x02: st = "left"; break;
+                case 0x03: st = "tc_rejoin"; break;
+            }
+            ESP_LOGI(TAG, "Device update: 0x%04X status=%s(%d)",
+                     upd->short_addr, st, upd->status);
         }
-        const char *tc_str = "unknown";
-        switch (upd->tc_action) {
-            case 0: tc_str = "authorize"; break;
-            case 1: tc_str = "DENY"; break;
-            case 2: tc_str = "ignore"; break;
-        }
-        ESP_LOGW(TAG, "Device UPDATE: 0x%04X status=%s tc_action=%s IEEE:%02X:%02X:%02X:%02X:%02X:%02X:%02X:%02X",
-                 upd->short_addr, status_str, tc_str,
-                 upd->long_addr[7], upd->long_addr[6],
-                 upd->long_addr[5], upd->long_addr[4],
-                 upd->long_addr[3], upd->long_addr[2],
-                 upd->long_addr[1], upd->long_addr[0]);
         break;
     }
-
-    case ESP_ZB_ZDO_SIGNAL_DEVICE_AUTHORIZED: {
-        esp_zb_zdo_signal_device_authorized_params_t *auth =
-            (esp_zb_zdo_signal_device_authorized_params_t *)esp_zb_app_signal_get_params(p_sg_p);
-        if (!auth) break;
-        ESP_LOGW(TAG, "Device AUTHORIZED: 0x%04X type=%d status=%d IEEE:%02X:%02X:%02X:%02X:%02X:%02X:%02X:%02X",
-                 auth->short_addr, auth->authorization_type, auth->authorization_status,
-                 auth->long_addr[7], auth->long_addr[6],
-                 auth->long_addr[5], auth->long_addr[4],
-                 auth->long_addr[3], auth->long_addr[2],
-                 auth->long_addr[1], auth->long_addr[0]);
-        break;
-    }
-
-    case ESP_ZB_NLME_STATUS_INDICATION: {
-        ESP_LOGI(TAG, "NLME status indication, status: %s", esp_err_to_name(err_status));
-        break;
-    }
-
-    case ESP_ZB_ZDO_SIGNAL_PRODUCTION_CONFIG_READY:
-        ESP_LOGI(TAG, "Production config ready, status: %s", esp_err_to_name(err_status));
-        break;
 
     default:
         /* Log ALL signals at INFO level for debugging */
@@ -551,6 +507,69 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                  esp_zb_zdo_signal_to_string(sig_type), sig_type,
                  esp_err_to_name(err_status));
         break;
+    }
+}
+
+/* ── Xiaomi 0xFF01 private attribute parser ───────────── */
+
+/* ZCL data type sizes (returns 0 for variable-length / unknown) */
+static int zcl_type_size(uint8_t type)
+{
+    switch (type) {
+    case 0x08: return 1;  /* data8 */
+    case 0x09: return 2;  /* data16 */
+    case 0x10: return 1;  /* boolean */
+    case 0x18: return 1;  /* bitmap8 */
+    case 0x19: return 2;  /* bitmap16 */
+    case 0x20: return 1;  /* uint8 */
+    case 0x21: return 2;  /* uint16 */
+    case 0x22: return 3;  /* uint24 */
+    case 0x23: return 4;  /* uint32 */
+    case 0x24: return 5;  /* uint40 */
+    case 0x25: return 6;  /* uint48 */
+    case 0x28: return 1;  /* int8 */
+    case 0x29: return 2;  /* int16 */
+    case 0x2a: return 3;  /* int24 */
+    case 0x2b: return 4;  /* int32 */
+    case 0x39: return 4;  /* float */
+    case 0x3a: return 8;  /* double */
+    case 0x41: case 0x42: return 0;  /* octet/char string — variable */
+    default:   return 0;
+    }
+}
+
+static void parse_xiaomi_ff01(zb_device_t *dev, const uint8_t *data, size_t len)
+{
+    /* data points to the octet string payload (after ZCL type+length prefix).
+       Format: sequence of TLV entries: tag(1) + zcl_type(1) + value(N) */
+    size_t pos = 0;
+    while (pos + 2 <= len) {
+        uint8_t tag  = data[pos++];
+        uint8_t type = data[pos++];
+
+        int vsize = zcl_type_size(type);
+        if (vsize == 0) {
+            /* Variable-length string: 1-byte length prefix */
+            if (pos >= len) break;
+            vsize = data[pos++];
+            pos += vsize;  /* skip string data */
+            continue;
+        }
+        if (pos + vsize > len) break;
+
+        switch (tag) {
+        case 0x01:  /* Battery voltage (uint16, mV) */
+            if (vsize >= 2) {
+                dev->has_battery = true;
+                dev->battery_mv = data[pos] | (data[pos + 1] << 8);
+            }
+            break;
+        case 0x03:  /* Device temperature (int8, °C) */
+            dev->device_temp = (int8_t)data[pos];
+            break;
+        }
+
+        pos += vsize;
     }
 }
 
@@ -638,8 +657,101 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
                     dep->pressure = *(int16_t *)msg->attribute.data.value;
                     ESP_LOGI(TAG, "0x%04X EP%d: pressure=%d hPa", addr, ep, dep->pressure);
                 }
+                else if (cluster == ESP_ZB_ZCL_CLUSTER_ID_BASIC && attr == 0xFF01) {
+                    /* Xiaomi private attribute: TLV with battery, temperature, etc. */
+                    uint8_t *raw = (uint8_t *)msg->attribute.data.value;
+                    uint16_t raw_len = msg->attribute.data.size;
+                    /* Octet string: first byte is length */
+                    if (raw_len > 1) {
+                        uint8_t slen = raw[0];
+                        if (slen > raw_len - 1) slen = raw_len - 1;
+                        parse_xiaomi_ff01(dev, raw + 1, slen);
+                        if (dev->has_battery) {
+                            ESP_LOGI(TAG, "0x%04X Xiaomi: battery=%dmV temp=%d°C",
+                                     addr, dev->battery_mv, dev->device_temp);
+                        }
+                    }
+                }
                 else {
                     ESP_LOGI(TAG, "0x%04X EP%d: cluster=0x%04X attr=0x%04X (unhandled)", addr, ep, cluster, attr);
+                }
+            }
+
+            /* Dispatch to automation engine */
+            if (dep) {
+                auto_event_t aevt = {
+                    .type = AUTO_EVT_PROPERTY_UPDATE,
+                    .short_addr = addr,
+                    .endpoint = ep,
+                    .cluster = msg->cluster,
+                    .attr_id = msg->attribute.id,
+                };
+                memcpy(aevt.ieee, dev->ieee_addr, 8);
+
+                uint16_t a_cluster = msg->cluster;
+                uint16_t a_attr    = msg->attribute.id;
+
+                if (a_cluster == ESP_ZB_ZCL_CLUSTER_ID_ON_OFF &&
+                    a_attr == ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID) {
+                    strlcpy(aevt.property, "on_off", sizeof(aevt.property));
+                    aevt.value.b = dep->on_off_state;
+                    aevt.value_type = 2;
+                }
+                else if (a_cluster == ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT) {
+                    strlcpy(aevt.property, "temperature", sizeof(aevt.property));
+                    aevt.value.f = dep->temperature / 100.0f;
+                    aevt.value_type = 1;
+                }
+                else if (a_cluster == ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT) {
+                    strlcpy(aevt.property, "humidity", sizeof(aevt.property));
+                    aevt.value.f = dep->humidity / 100.0f;
+                    aevt.value_type = 1;
+                }
+                else if (a_cluster == ESP_ZB_ZCL_CLUSTER_ID_PRESSURE_MEASUREMENT) {
+                    strlcpy(aevt.property, "pressure", sizeof(aevt.property));
+                    aevt.value.i = dep->pressure;
+                    aevt.value_type = 0;
+                }
+                else if (a_cluster == ESP_ZB_ZCL_CLUSTER_ID_ILLUMINANCE_MEASUREMENT) {
+                    strlcpy(aevt.property, "illuminance", sizeof(aevt.property));
+                    aevt.value.i = dep->illuminance;
+                    aevt.value_type = 0;
+                }
+                else if (a_cluster == ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING) {
+                    strlcpy(aevt.property, "occupancy", sizeof(aevt.property));
+                    aevt.value.b = dep->occupancy != 0;
+                    aevt.value_type = 2;
+                }
+                else if (a_cluster == ESP_ZB_ZCL_CLUSTER_ID_LEVEL_CONTROL) {
+                    strlcpy(aevt.property, "level", sizeof(aevt.property));
+                    aevt.value.i = dep->level;
+                    aevt.value_type = 0;
+                }
+
+                if (aevt.property[0]) {
+                    automation_dispatch_event(&aevt);
+                }
+            }
+
+            /* ── Immediate bind retry for sleepy devices ──────────
+             * Device just sent a report → it is awake RIGHT NOW (~50ms window).
+             * If bind hasn't succeeded yet, send bind immediately.
+             * Only gate: !s_bind_busy (NCP rejects concurrent binds). */
+            if (!dev->bind_done && dev->manufacturer[0] != '\0' && !s_bind_busy) {
+                device_def_t retry_def;
+                if (device_defs_find(dev->manufacturer, dev->model, &retry_def) &&
+                    retry_def.bind_count > 0) {
+                    uint8_t retry_ieee[8];
+                    memcpy(retry_ieee, dev->ieee_addr, 8);
+                    uint16_t retry_addr = dev->short_addr;
+                    device_unlock();
+
+                    ESP_LOGI(TAG, "0x%04X: report received, retrying bind (device awake)", retry_addr);
+                    zigbee_start_autobind(retry_addr, retry_ieee, &retry_def);
+
+                    if (save_needed) device_list_save_deferred();
+                    ws_notify_device_update(addr);
+                    return ESP_OK;
                 }
             }
         }
@@ -663,12 +775,14 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
             if (var->status == ESP_ZB_ZCL_STATUS_SUCCESS && var->attribute.data.value) {
                 /* ZCL string: first byte = length, then chars (no null terminator) */
                 uint8_t *raw = (uint8_t *)var->attribute.data.value;
-                uint8_t slen = raw[0];
-                if (slen == 0xFF) slen = 0;  /* 0xFF = invalid ZCL string */
-                if (slen > 30) slen = 30;  /* cap to fit our buffer */
-                /* Validate against reported data size (size includes length byte) */
-                if (var->attribute.data.size > 0 && slen > var->attribute.data.size - 1) {
-                    slen = var->attribute.data.size - 1;
+                uint8_t slen = 0;
+                if (var->attribute.data.size >= 2) {
+                    slen = raw[0];
+                    if (slen == 0xFF) slen = 0;  /* 0xFF = invalid ZCL string */
+                    if (slen > 30) slen = 30;  /* cap to fit our buffer */
+                    if (slen > var->attribute.data.size - 1) {
+                        slen = var->attribute.data.size - 1;
+                    }
                 }
 
                 if (var->attribute.id == ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID) {
@@ -698,10 +812,9 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
                 if (model[0]) strncpy(dev->model, model, sizeof(dev->model) - 1);
                 memcpy(ieee, dev->ieee_addr, 8);
 
-                /* Copy def data — pointer may become stale after unlock */
-                const device_def_t *def = device_defs_find(dev->manufacturer, dev->model);
-                if (def && def->bind_count > 0) {
-                    memcpy(&def_copy, def, sizeof(def_copy));
+                /* Copy def data under defs mutex (copy-out pattern) */
+                if (device_defs_find(dev->manufacturer, dev->model, &def_copy) &&
+                    def_copy.bind_count > 0) {
                     do_bind = true;
                 }
             }
@@ -721,37 +834,13 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
 
 static void zigbee_task(void *pvParams)
 {
-#if CONFIG_OPENTHREAD_SPINEL_ONLY
-    esp_radio_spinel_register_rcp_failure_handler(rcp_error_handler, ESP_RADIO_SPINEL_ZIGBEE);
-#endif
-
     /* Init as coordinator */
     esp_zb_cfg_t zb_cfg = ESP_ZB_ZC_CONFIG();
     esp_zb_init(&zb_cfg);
 
-    /* ── Legacy device support (Xiaomi, IKEA old gen, etc.) ── */
-    /* Allow devices that don't do TC Link Key exchange to stay in the network */
-    esp_zb_secur_link_key_exchange_required_set(false);
-    /* Don't require install codes — accept any device */
-    esp_zb_secur_ic_only_enable(false);
-    /* Set minimum join LQI to 0 — don't reject weak-signal devices */
-    esp_zb_secur_network_min_join_lqi_set(0);
-    /* Allow TC rejoin — devices can rejoin through Trust Center */
-    esp_zb_secur_tcpol_set_allow_tc_rejoins(1);
-    /* Allow unsecure TC rejoin — devices without valid link key can rejoin */
-    esp_zb_secur_set_unsecure_tc_rejoin_enabled(true);
-    ESP_LOGI(TAG, "Security: legacy support ENABLED (no TCLK, TC rejoin allowed)");
-
-#if CONFIG_OPENTHREAD_SPINEL_ONLY
-    /* Check RCP version, auto-update if needed */
-    char rcp_ver[RCP_VERSION_MAX_SIZE];
-    if (esp_radio_spinel_rcp_version_get(rcp_ver, ESP_RADIO_SPINEL_ZIGBEE) == ESP_OK) {
-        ESP_LOGI(TAG, "Running RCP Version: %s", rcp_ver);
-#if CONFIG_ZIGBEE_GW_AUTO_UPDATE_RCP
-        rcp_auto_update(rcp_ver);
-#endif
-    }
-#endif
+    /* TC rejoin & security policies are configured on the NCP side
+     * (esp32-ncp/main/esp_zigbee_ncp.c — calls real ZBOSS APIs).
+     * Host-side calls are no-ops: 0x002A is a stub, 0x0032 doesn't exist. */
 
     /* Channel mask — check NVS override first */
     uint32_t channel_mask = GW_CHANNEL_MASK;
@@ -769,42 +858,86 @@ static void zigbee_task(void *pvParams)
     esp_zb_set_primary_network_channel_set(channel_mask);
     ESP_LOGI(TAG, "Channel mask: 0x%08lx", (unsigned long)channel_mask);
 
-    /* Create coordinator endpoint */
-    esp_zb_ep_list_t *ep_list = esp_zb_ep_list_create();
-    esp_zb_cluster_list_t *cluster_list = esp_zb_zcl_cluster_list_create();
-
-    esp_zb_attribute_list_t *basic_cl = esp_zb_basic_cluster_create(NULL);
-    esp_zb_basic_cluster_add_attr(basic_cl, ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID, ESP_MANUFACTURER_NAME);
-    esp_zb_basic_cluster_add_attr(basic_cl, ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID, ESP_MODEL_IDENTIFIER);
-    esp_zb_cluster_list_add_basic_cluster(cluster_list, basic_cl, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
-    esp_zb_cluster_list_add_identify_cluster(cluster_list, esp_zb_identify_cluster_create(NULL), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
-
-    esp_zb_endpoint_config_t ep_cfg = {
-        .endpoint       = GW_ENDPOINT,
-        .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
-        .app_device_id  = ESP_ZB_HA_REMOTE_CONTROL_DEVICE_ID,
-        .app_device_version = 0,
+    /* Register coordinator endpoint on NCP.
+     * Input (server) clusters: we implement these.
+     * Output (client) clusters: we talk to these on remote devices
+     *   — needed for ZCL Read Attr, On/Off commands, and binding for reports. */
+    uint16_t input_clusters[] = {
+        ESP_ZB_ZCL_CLUSTER_ID_BASIC,
+        ESP_ZB_ZCL_CLUSTER_ID_IDENTIFY,
     };
-    esp_zb_ep_list_add_gateway_ep(ep_list, cluster_list, ep_cfg);
-    esp_zb_device_register(ep_list);
-
+    uint16_t output_clusters[] = {
+        ESP_ZB_ZCL_CLUSTER_ID_BASIC,                     /* 0x0000 — read manufacturer/model */
+        ESP_ZB_ZCL_CLUSTER_ID_IDENTIFY,                  /* 0x0003 */
+        ESP_ZB_ZCL_CLUSTER_ID_ON_OFF,                    /* 0x0006 — on/off commands */
+        ESP_ZB_ZCL_CLUSTER_ID_LEVEL_CONTROL,             /* 0x0008 — level control */
+        ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT,          /* 0x0402 — temperature reports */
+        ESP_ZB_ZCL_CLUSTER_ID_PRESSURE_MEASUREMENT,      /* 0x0403 — pressure reports */
+        ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT,  /* 0x0405 — humidity reports */
+        ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING,         /* 0x0406 — occupancy reports */
+        ESP_ZB_ZCL_CLUSTER_ID_ILLUMINANCE_MEASUREMENT,   /* 0x0400 — illuminance reports */
+    };
+    esp_host_zb_endpoint_t gw_endpoint = {
+        .endpoint = GW_ENDPOINT,
+        .profileId = ESP_ZB_AF_HA_PROFILE_ID,
+        .deviceId = ESP_ZB_HA_REMOTE_CONTROL_DEVICE_ID,
+        .appFlags = 0,
+        .inputClusterCount = sizeof(input_clusters) / sizeof(input_clusters[0]),
+        .inputClusterList = input_clusters,
+        .outputClusterCount = sizeof(output_clusters) / sizeof(output_clusters[0]),
+        .outputClusterList = output_clusters,
+    };
     esp_zb_core_action_handler_register(zb_action_handler);
 
-    /* ZBOSS trace — WARNING level only (DEBUG floods 8KB log buffer) */
-    esp_zb_set_trace_level_mask(ESP_ZB_TRACE_LEVEL_WARN,
-        ESP_ZB_TRACE_SUBSYSTEM_MAC |
-        ESP_ZB_TRACE_SUBSYSTEM_NWK |
-        ESP_ZB_TRACE_SUBSYSTEM_ZDO |
-        ESP_ZB_TRACE_SUBSYSTEM_SECUR);
+    /* Register endpoint BEFORE esp_zb_start() — standard Zigbee lifecycle */
+    esp_host_zb_ep_create(&gw_endpoint);
 
-    ESP_LOGI(TAG, "Starting Zigbee coordinator...");
+    ESP_LOGI(TAG, "Starting Zigbee coordinator (NCP mode)...");
     ESP_ERROR_CHECK(esp_zb_start(false));
 
-    /* Blocks forever */
+    /* Blocks forever — dispatches ZNSP notifications from NCP */
     esp_zb_stack_main_loop();
 
-    esp_rcp_update_deinit();
     vTaskDelete(NULL);
+}
+
+/* ── NCP Watchdog ──────────────────────────────────────── */
+
+#define NCP_WD_INTERVAL_MS  30000   /* Ping every 30 seconds */
+#define NCP_WD_MAX_FAILS    2       /* Reset after 2 consecutive timeouts */
+
+static TimerHandle_t s_ncp_wd_timer;
+static int s_ncp_wd_fails;
+
+static void ncp_watchdog_cb(TimerHandle_t timer)
+{
+    if (!s_running) return;  /* Don't ping before network is up */
+
+    if (!esp_zb_lock_acquire(pdMS_TO_TICKS(2000))) {
+        ESP_LOGW(TAG, "NCP watchdog: could not acquire lock");
+        return;
+    }
+    esp_err_t err = esp_zb_ncp_get_network_state();
+    esp_zb_lock_release();
+
+    if (err == ESP_OK) {
+        if (s_ncp_wd_fails > 0) {
+            ESP_LOGI(TAG, "NCP watchdog: recovered after %d failures", s_ncp_wd_fails);
+        }
+        s_ncp_wd_fails = 0;
+        ESP_LOGD(TAG, "NCP watchdog: ping OK");
+    } else {
+        s_ncp_wd_fails++;
+        ESP_LOGW(TAG, "NCP watchdog: ping failed (%s), consecutive=%d/%d",
+                 esp_err_to_name(err), s_ncp_wd_fails, NCP_WD_MAX_FAILS);
+
+        if (s_ncp_wd_fails >= NCP_WD_MAX_FAILS) {
+            ESP_LOGE(TAG, "NCP watchdog: %d consecutive failures — resetting", s_ncp_wd_fails);
+            zigbee_ncp_reset();
+            vTaskDelay(pdMS_TO_TICKS(500));
+            esp_restart();
+        }
+    }
 }
 
 /* ── Public API ────────────────────────────────────────── */
@@ -814,35 +947,33 @@ esp_err_t zigbee_platform_init(void)
     /* Hook into ESP log system to capture logs for web viewer */
     memset(s_log_buf, 0, sizeof(s_log_buf));
     s_log_head = 0;
+    s_log_mutex = xSemaphoreCreateMutex();
     s_orig_vprintf = esp_log_set_vprintf(log_vprintf_hook);
 
     esp_zb_platform_config_t config = {
-        .radio_config = ESP_ZB_DEFAULT_RADIO_CONFIG(),
-        .host_config  = ESP_ZB_DEFAULT_HOST_CONFIG(),
+        .radio_config = { .radio_mode = RADIO_MODE_UART_NCP },
+        .host_config  = { .host_mode = HOST_CONNECTION_MODE_UART },
     };
     return esp_zb_platform_config(&config);
 }
 
-esp_err_t zigbee_rcp_update_init(void)
+esp_err_t zigbee_ncp_reset(void)
 {
-#if CONFIG_ZIGBEE_GW_AUTO_UPDATE_RCP
-    esp_vfs_spiffs_conf_t spiffs_conf = {
-        .base_path = "/rcp_fw",
-        .partition_label = "rcp_fw",
-        .max_files = 10,
-        .format_if_mount_failed = false,
+    /* Reset H2 NCP into normal boot mode via RESET/BOOT pins */
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << 7) | (1ULL << 8),  /* GPIO7=RESET, GPIO8=BOOT */
+        .mode = GPIO_MODE_OUTPUT,
     };
-    esp_err_t err = esp_vfs_spiffs_register(&spiffs_conf);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "SPIFFS mount failed (0x%x) — RCP auto-update disabled", err);
-        return ESP_OK; /* Non-fatal */
-    }
+    gpio_config(&io_conf);
 
-    esp_rcp_update_config_t rcp_cfg = ESP_ZB_RCP_UPDATE_CONFIG();
-    return esp_rcp_update_init(&rcp_cfg);
-#else
+    gpio_set_level(8, 1);   /* BOOT high = normal SPI boot */
+    gpio_set_level(7, 0);   /* RESET low = hold in reset */
+    vTaskDelay(pdMS_TO_TICKS(50));
+    gpio_set_level(7, 1);   /* RESET high = release, H2 boots */
+    vTaskDelay(pdMS_TO_TICKS(1500)); /* Wait for H2 bootloader + NCP app init */
+
+    ESP_LOGI(TAG, "H2 NCP reset complete");
     return ESP_OK;
-#endif
 }
 
 esp_err_t zigbee_start(void)
@@ -867,7 +998,10 @@ void zigbee_get_status(zigbee_status_t *out)
 
 void zigbee_permit_join(uint8_t duration_sec)
 {
-    esp_zb_lock_acquire(portMAX_DELAY);
+    if (!esp_zb_lock_acquire(pdMS_TO_TICKS(3000))) {
+        ESP_LOGW(TAG, "Zigbee lock timeout (permit_join)");
+        return;
+    }
     esp_zb_bdb_open_network(duration_sec);
     esp_zb_lock_release();
     ESP_LOGI(TAG, "Permit join: %ds", duration_sec);
@@ -885,7 +1019,10 @@ void zigbee_send_on_off(uint16_t addr, uint8_t endpoint, uint8_t cmd)
         .on_off_cmd_id = cmd,
     };
 
-    esp_zb_lock_acquire(portMAX_DELAY);
+    if (!esp_zb_lock_acquire(pdMS_TO_TICKS(3000))) {
+        ESP_LOGW(TAG, "Zigbee lock timeout (on_off)");
+        return;
+    }
     esp_zb_zcl_on_off_cmd_req(&cmd_req);
     esp_zb_lock_release();
 
@@ -908,7 +1045,10 @@ void zigbee_read_attribute(uint16_t addr, uint8_t endpoint,
         .attr_field   = attrs,
     };
 
-    esp_zb_lock_acquire(portMAX_DELAY);
+    if (!esp_zb_lock_acquire(pdMS_TO_TICKS(3000))) {
+        ESP_LOGW(TAG, "Zigbee lock timeout (read_attr)");
+        return;
+    }
     esp_zb_zcl_read_attr_cmd_req(&cmd);
     esp_zb_lock_release();
 }
@@ -967,4 +1107,17 @@ void zigbee_factory_reset(void)
 
     vTaskDelay(pdMS_TO_TICKS(200));
     esp_restart();
+}
+
+void zigbee_ncp_watchdog_init(void)
+{
+    s_ncp_wd_timer = xTimerCreate("ncp_wd", pdMS_TO_TICKS(NCP_WD_INTERVAL_MS),
+                                   pdTRUE, NULL, ncp_watchdog_cb);
+    if (s_ncp_wd_timer) {
+        xTimerStart(s_ncp_wd_timer, 0);
+        ESP_LOGI(TAG, "NCP watchdog started (interval=%ds, threshold=%d failures)",
+                 NCP_WD_INTERVAL_MS / 1000, NCP_WD_MAX_FAILS);
+    } else {
+        ESP_LOGE(TAG, "Failed to create NCP watchdog timer");
+    }
 }

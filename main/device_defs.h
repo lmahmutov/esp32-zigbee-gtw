@@ -24,13 +24,13 @@ typedef struct {
 /* Initialize device definitions subsystem (mount SPIFFS if needed, load JSON) */
 void device_defs_init(void);
 
-/* Reload definitions from /rcp_fw/devices.json */
+/* Reload definitions from /storage/devices.json */
 void device_defs_load(void);
 
-/* Find definition for manufacturer+model. Returns NULL if no match. */
-const device_def_t *device_defs_find(const char *manufacturer, const char *model);
+/* Find definition for manufacturer+model. Copies result into *out. Returns true if found. */
+bool device_defs_find(const char *manufacturer, const char *model, device_def_t *out);
 
-/* Save JSON string to /rcp_fw/devices.json and reload. Returns 0 on success. */
+/* Save JSON string to /storage/devices.json and reload. Returns 0 on success. */
 int device_defs_save(const char *json_str, size_t len);
 
 /* Read file into malloc'd buffer (caller frees). Returns NULL on error. */

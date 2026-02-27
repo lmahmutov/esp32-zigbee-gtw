@@ -33,7 +33,7 @@ After adding new Kconfig options, always run `idf.py reconfigure` before buildin
 
 ## Hardware
 
-ESP32-S3 WROOM-1 (4MB flash, **no PSRAM**) + ESP32-H2 RCP (connected via UART: TX=GPIO17, RX=GPIO18, RST=GPIO7, BOOT=GPIO8). Custom partition table in `partitions.csv` — dual OTA slots (~1.75MB each), Zigbee NVRAM (zb_storage + zb_fct), and SPIFFS (rcp_fw) for RCP firmware images.
+ESP32-S3 WROOM-1 (4MB flash, **no PSRAM**) + ESP32-H2 NCP (connected via UART: TX=GPIO17, RX=GPIO18, RST=GPIO7, BOOT=GPIO8). Custom partition table in `partitions.csv` — dual OTA slots (~1.75MB each), Zigbee NVRAM (zb_storage + zb_fct), and SPIFFS (storage) for device definitions.
 
 ## Architecture
 
@@ -44,9 +44,9 @@ Single ESP-IDF component (`main/`). All `.c` files compile into one component. `
 | Module | File | Role |
 |--------|------|------|
 | Entry | `main.c` | Init orchestration, OTA rollback validation |
-| Zigbee | `zigbee.c` | ZBOSS coordinator, device discovery, auto-bind, log capture |
+| Zigbee | `zigbee.c` | NCP host coordinator, device discovery, auto-bind, log capture |
 | Devices | `device_list.c` | In-memory device table (mutex-protected), NVS persistence |
-| Definitions | `device_defs.c` | JSON binding templates from SPIFFS (`/rcp_fw/devices.json`) |
+| Definitions | `device_defs.c` | JSON binding templates from SPIFFS (`/storage/devices.json`) |
 | HTTP | `web_server.c` | REST API, OTA upload, Basic Auth on POST endpoints |
 | WebSocket | `ws_server.c` | Real-time push: status, device updates, log streaming |
 | WiFi | `wifi.c` | STA/AP fallback, mDNS, periodic reconnect timer |
@@ -54,7 +54,7 @@ Single ESP-IDF component (`main/`). All `.c` files compile into one component. `
 
 ### Init Order (app_main)
 
-`zigbee_platform_init()` → NVS → event loop/netif → `device_list_init()` → `wifi_init()` + connect/AP → `wifi_reconnect_timer_init()` → `web_server_start()` → OTA rollback check → `zigbee_rcp_update_init()` → `device_defs_init()` → `zigbee_start()`
+`zigbee_platform_init()` → NVS → event loop/netif → `device_list_init()` → `wifi_init()` + connect/AP → `wifi_reconnect_timer_init()` → `web_server_start()` → OTA rollback check → `zigbee_ncp_reset()` → `device_defs_init()` → `zigbee_start()`
 
 ### Task Model
 
@@ -100,4 +100,4 @@ Device announce → `device_add()` → Active EP request → Simple Descriptor f
 Server: `root@77.91.79.32`
 - OTA firmware: `/root/esp-gateway/zigbee-gateway.bin`
 - Web Flasher: `/root/esp-flasher/` (port 8090, systemd `esp-flasher.service`)
-- Firmware binaries: `/root/esp-flasher/firmware/` (bootloader, partition-table, ota_data, gateway, rcp)
+- Firmware binaries: `/root/esp-flasher/firmware/` (s3/ and h2/ — bootloader, partition-table, ota_data, app)

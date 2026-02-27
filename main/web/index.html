@@ -161,6 +161,10 @@ a{color:var(--primary);text-decoration:none}
         <svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z"/></svg>
         <span>Logs</span>
       </a>
+      <a href="#automations" onclick="navigate('automations')">
+        <svg viewBox="0 0 24 24"><path d="M17 7h-4v2h4c1.65 0 3 1.35 3 3s-1.35 3-3 3h-4v2h4c2.76 0 5-2.24 5-5s-2.24-5-5-5zm-6 8H7c-1.65 0-3-1.35-3-3s1.35-3 3-3h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-2zm-3-4h8v2H8z"/></svg>
+        <span>Automations</span>
+      </a>
       <a href="#definitions" onclick="navigate('definitions')">
         <svg viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm-1 7V3.5L18.5 9H13zM6 20V4h5v7h7v9H6z"/></svg>
         <span>Definitions</span>
@@ -312,9 +316,10 @@ function navigate(page){
     a.classList.toggle('active',a.getAttribute('href')==='#'+page);
   });
   document.getElementById('pageTitle').textContent=
-    {overview:'Overview',devices:'Devices',network:'Network',settings:'Settings',logs:'Logs',definitions:'Definitions'}[page];
+    {overview:'Overview',devices:'Devices',network:'Network',settings:'Settings',logs:'Logs',automations:'Automations',definitions:'Definitions'}[page];
   render();
   if(page==='logs')refreshLogs();
+  if(page==='automations')setTimeout(loadAutomations,50);
   if(page==='definitions')setTimeout(loadDefs,50);
   if(window.innerWidth<=768)toggleMenu();
 }
@@ -349,6 +354,7 @@ function render(){
     case 'network':c.innerHTML=renderNetwork();break;
     case 'settings':c.innerHTML=renderSettings();break;
     case 'logs':if(!document.getElementById('logBox'))c.innerHTML=renderLogs();break;
+    case 'automations':c.innerHTML=renderAutomations();break;
     case 'definitions':c.innerHTML=renderDefinitions();break;
   }
 }
@@ -554,12 +560,9 @@ function renderSettings(){
       <button class="btn btn-primary" onclick="doChangePassword()">Change Password</button>
     </div>
     <div class="card">
-      <h3>RCP Firmware (ESP32-H2)</h3>
-      <p style="color:var(--text2);margin-bottom:12px">The ESP32-H2 radio co-processor runs the Zigbee RCP firmware.
-        Auto-update flashes H2 on boot when a new firmware is embedded in the build.</p>
-      <div style="display:flex;gap:8px">
-        <button class="btn btn-outline" onclick="doRcpReflash()">Re-flash RCP</button>
-      </div>
+      <h3>NCP Firmware (ESP32-H2)</h3>
+      <p style="color:var(--text2);margin-bottom:12px">The ESP32-H2 runs the Zigbee NCP firmware.
+        Flash via USB using the web flasher at the VDS server.</p>
     </div>
   </div>`;
 }
@@ -748,19 +751,292 @@ async function doSaveDefs(){
   else if(res)toast(res.error||'Save failed','error');
 }
 
+/* ── Automations page ──────────────────────────────────── */
+let autoList=[], autoEditing=null, blocklyWs=null;
+
+function renderAutomations(){
+  if(autoEditing) return renderAutoEditor();
+  let rows='';
+  if(!autoList.length){
+    rows='<div class="empty"><p>No automations yet</p></div>';
+  }else{
+    rows=autoList.map(s=>`
+      <div class="card" style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
+        <div style="flex:1">
+          <div style="font-weight:500">${esc(s.name||s.id)}</div>
+          <div style="font-size:11px;color:var(--text2)">${esc(s.id)} ${s.running?'<span style="color:var(--success)">running</span>':''}</div>
+        </div>
+        <label class="toggle"><input type="checkbox" ${s.enabled?'checked':''} onchange="doAutoToggle('${esc(s.id)}')"><span class="slider"></span></label>
+        <button class="btn btn-sm btn-outline" onclick="editAuto('${esc(s.id)}')">Edit</button>
+        <button class="btn btn-sm btn-outline" onclick="doAutoRun('${esc(s.id)}')">Test</button>
+        <button class="btn btn-sm btn-danger" onclick="doAutoDelete('${esc(s.id)}')">Del</button>
+      </div>`).join('');
+  }
+  return `<div style="margin-bottom:16px;display:flex;gap:8px">
+    <button class="btn btn-primary" onclick="newAuto()">New Automation</button>
+  </div><div>${rows}</div>`;
+}
+
+function renderAutoEditor(){
+  const s=autoEditing;
+  return `<div style="margin-bottom:12px;display:flex;gap:8px;align-items:center">
+    <button class="btn btn-outline" onclick="closeAutoEditor()">Back</button>
+    <h2 style="flex:1;font-size:16px">${s.id?'Edit':'New'} Automation</h2>
+    <button class="btn btn-primary" onclick="doAutoSave()">Save</button>
+  </div>
+  <div class="card" style="margin-bottom:12px">
+    <div style="display:flex;gap:12px;flex-wrap:wrap">
+      <div class="form-group" style="flex:1;min-width:200px"><label>ID (slug)</label>
+        <input id="autoId" value="${esc(s.id)}" ${s.id?'readonly':''} placeholder="my_script"></div>
+      <div class="form-group" style="flex:1;min-width:200px"><label>Name</label>
+        <input id="autoName" value="${esc(s.name)}" placeholder="My Automation"></div>
+      <div class="form-group" style="min-width:100px"><label>Enabled</label>
+        <label class="toggle" style="margin-top:6px"><input type="checkbox" id="autoEnabled" ${s.enabled?'checked':''}><span class="slider"></span></label></div>
+    </div>
+  </div>
+  <div class="card" style="margin-bottom:12px">
+    <div style="display:flex;gap:8px;margin-bottom:8px">
+      <button class="btn btn-sm ${!s._tab||s._tab==='code'?'btn-primary':'btn-outline'}" onclick="autoTab('code')">Lua Code</button>
+      <button class="btn btn-sm ${s._tab==='blockly'?'btn-primary':'btn-outline'}" onclick="autoTab('blockly')">Blockly</button>
+    </div>
+    <div id="autoCodeTab" style="display:${!s._tab||s._tab==='code'?'block':'none'}">
+      <textarea id="autoCode" style="width:100%;height:300px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:12px;font-family:'Cascadia Code','Fira Code',monospace;font-size:13px;resize:vertical;tab-size:2" placeholder="-- Write Lua code here
+zigbee.on('property_update', {property='temperature'}, function(event)
+  if event.value > 30 then
+    zigbee.turn_on('my_fan')
+  end
+end)">${esc(s.lua_code||'')}</textarea>
+    </div>
+    <div id="autoBlocklyTab" style="display:${s._tab==='blockly'?'block':'none'}">
+      <div id="blocklyArea" style="height:400px;border:1px solid var(--border);border-radius:8px;overflow:hidden"></div>
+      <button class="btn btn-sm btn-outline" style="margin-top:8px" onclick="blocklyToLua()">Generate Lua from blocks</button>
+    </div>
+  </div>
+  <div class="card">
+    <h3>Test Output</h3>
+    <div id="autoTestOutput" class="log-box" style="min-height:60px;max-height:200px">Click "Save" then "Test" to run</div>
+    <button class="btn btn-sm btn-outline" style="margin-top:8px" onclick="doAutoRunInline()">Run Code</button>
+  </div>`;
+}
+
+function autoTab(tab){
+  if(!autoEditing)return;
+  autoEditing._tab=tab;
+  const codeT=document.getElementById('autoCodeTab');
+  const blkT=document.getElementById('autoBlocklyTab');
+  if(codeT)codeT.style.display=tab==='code'?'block':'none';
+  if(blkT){
+    blkT.style.display=tab==='blockly'?'block':'none';
+    if(tab==='blockly')initBlockly();
+  }
+  /* Update tab buttons */
+  const btns=document.querySelectorAll('#autoCodeTab,#autoBlocklyTab').item(0)?.parentElement.querySelectorAll('.btn-sm');
+}
+
+let blocklyLoaded=false;
+function initBlockly(){
+  const area=document.getElementById('blocklyArea');
+  if(!area||blocklyWs)return;
+  if(!window.Blockly){
+    if(blocklyLoaded)return;
+    blocklyLoaded=true;
+    /* Load Blockly from embedded firmware */
+    const s=document.createElement('script');
+    s.src='/blockly.js';
+    s.onload=()=>createBlocklyWorkspace();
+    s.onerror=()=>{blocklyLoaded=false;toast('Failed to load Blockly','error');};
+    document.head.appendChild(s);
+    return;
+  }
+  createBlocklyWorkspace();
+}
+
+function createBlocklyWorkspace(){
+  const area=document.getElementById('blocklyArea');
+  if(!area||!window.Blockly)return;
+
+  /* Define custom Zigbee blocks */
+  Blockly.defineBlocksWithJsonArray([
+    {type:'zigbee_on',message0:'When %1 %2 changes %3',args0:[
+      {type:'field_input',name:'IEEE',text:''},
+      {type:'field_input',name:'PROPERTY',text:'temperature'},
+      {type:'input_statement',name:'DO'}
+    ],colour:210,tooltip:'React to Zigbee property changes'},
+    {type:'zigbee_turn_on',message0:'Turn on %1',args0:[{type:'field_input',name:'DEVICE',text:''}],previousStatement:null,nextStatement:null,colour:120},
+    {type:'zigbee_turn_off',message0:'Turn off %1',args0:[{type:'field_input',name:'DEVICE',text:''}],previousStatement:null,nextStatement:null,colour:120},
+    {type:'zigbee_toggle',message0:'Toggle %1',args0:[{type:'field_input',name:'DEVICE',text:''}],previousStatement:null,nextStatement:null,colour:120},
+    {type:'zigbee_get_property',message0:'Get %1 property %2',args0:[
+      {type:'field_input',name:'DEVICE',text:''},
+      {type:'field_input',name:'PROPERTY',text:'temperature'}
+    ],output:null,colour:210},
+    {type:'zigbee_log',message0:'Log %1',args0:[{type:'input_value',name:'MSG',check:'String'}],previousStatement:null,nextStatement:null,colour:120},
+    {type:'event_value',message0:'event value',output:null,colour:210},
+    {type:'system_time_between',message0:'Time between %1 and %2 hours',args0:[
+      {type:'field_number',name:'FROM',value:22,min:0,max:23},
+      {type:'field_number',name:'TO',value:6,min:0,max:23}
+    ],output:'Boolean',colour:65},
+    {type:'zigbee_after',message0:'After %1 seconds %2',args0:[
+      {type:'field_number',name:'SECONDS',value:5,min:0,max:86400},
+      {type:'input_statement',name:'DO'}
+    ],previousStatement:null,nextStatement:null,colour:120}
+  ]);
+
+  /* Lua generators */
+  Blockly.Lua['zigbee_on']=function(b){
+    const ieee=b.getFieldValue('IEEE');
+    const prop=b.getFieldValue('PROPERTY');
+    const stmts=Blockly.Lua.statementToCode(b,'DO');
+    const filter=[];
+    if(ieee)filter.push('ieee="'+ieee+'"');
+    if(prop)filter.push('property="'+prop+'"');
+    return 'zigbee.on("property_update", {'+filter.join(', ')+'}, function(event)\n'+stmts+'end)\n';
+  };
+  Blockly.Lua['zigbee_turn_on']=function(b){return 'zigbee.turn_on("'+b.getFieldValue('DEVICE')+'")\n';};
+  Blockly.Lua['zigbee_turn_off']=function(b){return 'zigbee.turn_off("'+b.getFieldValue('DEVICE')+'")\n';};
+  Blockly.Lua['zigbee_toggle']=function(b){return 'zigbee.toggle("'+b.getFieldValue('DEVICE')+'")\n';};
+  Blockly.Lua['zigbee_get_property']=function(b){return['zigbee.get_property("'+b.getFieldValue('DEVICE')+'","'+b.getFieldValue('PROPERTY')+'")',Blockly.Lua.ORDER_HIGH];};
+  Blockly.Lua['zigbee_log']=function(b){const v=Blockly.Lua.valueToCode(b,'MSG',Blockly.Lua.ORDER_NONE)||'""';return'zigbee.log('+v+')\n';};
+  Blockly.Lua['event_value']=function(b){return['event.value',Blockly.Lua.ORDER_HIGH];};
+  Blockly.Lua['system_time_between']=function(b){return['system.time_between('+b.getFieldValue('FROM')+','+b.getFieldValue('TO')+')',Blockly.Lua.ORDER_HIGH];};
+  Blockly.Lua['zigbee_after']=function(b){
+    const sec=b.getFieldValue('SECONDS');
+    const stmts=Blockly.Lua.statementToCode(b,'DO');
+    return 'zigbee.after('+sec+', function()\n'+stmts+'end)\n';
+  };
+
+  /* Create workspace */
+  const toolbox={kind:'categoryToolbox',contents:[
+    {kind:'category',name:'Zigbee Events',colour:210,contents:[
+      {kind:'block',type:'zigbee_on'},
+      {kind:'block',type:'event_value'}
+    ]},
+    {kind:'category',name:'Zigbee Actions',colour:120,contents:[
+      {kind:'block',type:'zigbee_turn_on'},
+      {kind:'block',type:'zigbee_turn_off'},
+      {kind:'block',type:'zigbee_toggle'},
+      {kind:'block',type:'zigbee_get_property'},
+      {kind:'block',type:'zigbee_after'},
+      {kind:'block',type:'zigbee_log'}
+    ]},
+    {kind:'category',name:'Time',colour:65,contents:[
+      {kind:'block',type:'system_time_between'}
+    ]},
+    {kind:'sep'},
+    {kind:'category',name:'Logic',colour:'%{BKY_LOGIC_HUE}',contents:[
+      {kind:'block',type:'controls_if'},{kind:'block',type:'logic_compare'},
+      {kind:'block',type:'logic_operation'},{kind:'block',type:'logic_negate'},
+      {kind:'block',type:'logic_boolean'}
+    ]},
+    {kind:'category',name:'Math',colour:'%{BKY_MATH_HUE}',contents:[
+      {kind:'block',type:'math_number'},{kind:'block',type:'math_arithmetic'},
+      {kind:'block',type:'math_single'},{kind:'block',type:'math_constrain'}
+    ]},
+    {kind:'category',name:'Text',colour:'%{BKY_TEXTS_HUE}',contents:[
+      {kind:'block',type:'text'},{kind:'block',type:'text_join'},
+      {kind:'block',type:'text_length'}
+    ]},
+    {kind:'category',name:'Variables',custom:'VARIABLE',colour:'%{BKY_VARIABLES_HUE}'}
+  ]};
+
+  blocklyWs=Blockly.inject(area,{toolbox,theme:Blockly.Themes.Dark||undefined,grid:{spacing:20,length:3,colour:'#333',snap:true},zoom:{controls:true,wheel:true,startScale:0.9}});
+
+  /* Load saved XML */
+  if(autoEditing&&autoEditing.blockly_xml){
+    try{
+      const xml=Blockly.utils.xml.textToDom(autoEditing.blockly_xml);
+      Blockly.Xml.domToWorkspace(xml,blocklyWs);
+    }catch(e){console.warn('Blockly XML load:',e);}
+  }
+}
+
+function blocklyToLua(){
+  if(!blocklyWs)return;
+  const code=Blockly.Lua.workspaceToCode(blocklyWs);
+  const ta=document.getElementById('autoCode');
+  if(ta)ta.value=code;
+}
+
+async function loadAutomations(){
+  const r=await api('automations');
+  if(r)autoList=r;
+  if(!autoEditing)render();
+}
+
+function newAuto(){
+  autoEditing={id:'',name:'',lua_code:'',blockly_xml:'',enabled:true,_tab:'code'};
+  blocklyWs=null;
+  render();
+}
+
+async function editAuto(id){
+  const r=await api('automations?id='+encodeURIComponent(id));
+  if(!r)return;
+  autoEditing={...r,_tab:'code'};
+  blocklyWs=null;
+  render();
+}
+
+function closeAutoEditor(){
+  autoEditing=null;
+  blocklyWs=null;
+  render();
+  loadAutomations();
+}
+
+async function doAutoSave(){
+  if(!autoEditing)return;
+  const id=document.getElementById('autoId')?.value?.trim();
+  const name=document.getElementById('autoName')?.value?.trim();
+  const code=document.getElementById('autoCode')?.value||'';
+  const enabled=document.getElementById('autoEnabled')?.checked||false;
+  if(!id){toast('ID required','error');return;}
+
+  let xml='';
+  if(blocklyWs){
+    try{xml=Blockly.Xml.domToText(Blockly.Xml.workspaceToDom(blocklyWs));}catch(e){}
+  }else if(autoEditing.blockly_xml){
+    xml=autoEditing.blockly_xml;
+  }
+
+  const r=await api('automations',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({id,name:name||id,lua_code:code,blockly_xml:xml,enabled})});
+  if(r&&r.ok){toast('Saved');autoEditing.id=id;autoEditing.name=name||id;}
+  else toast(r?.error||'Save failed','error');
+}
+
+async function doAutoDelete(id){
+  if(!confirm('Delete automation "'+id+'"?'))return;
+  const r=await api('automations/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
+  if(r&&r.ok){toast('Deleted');loadAutomations();}
+  else toast(r?.error||'Failed','error');
+}
+
+async function doAutoToggle(id){
+  const r=await api('automations/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
+  if(r&&r.ok)loadAutomations();
+  else toast(r?.error||'Failed','error');
+}
+
+async function doAutoRun(id){
+  const r=await api('automations/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
+  if(r)toast(r.ok?'Test run complete':'Error: '+(r.logs||r.error),r.ok?'success':'error');
+}
+
+async function doAutoRunInline(){
+  const code=document.getElementById('autoCode')?.value;
+  if(!code){toast('No code to run','error');return;}
+  const out=document.getElementById('autoTestOutput');
+  if(out)out.textContent='Running...';
+  const r=await api('automations/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({lua_code:code})});
+  if(out)out.textContent=r?(r.logs||r.error||'(no output)'):'Request failed';
+}
+
 async function doChangePassword(){
   const pw=document.getElementById('newPassword').value;
   if(!pw){toast('Enter a password','error');return;}
   const r=await api('settings/password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw})});
   if(r&&r.ok){setAuthPw(pw);toast('Password changed');document.getElementById('newPassword').value='';}
   else toast(r?.error||'Failed','error');
-}
-async function doRcpReflash(){
-  if(!confirm('Re-flash ESP32-H2 RCP firmware? Zigbee will be interrupted.'))return;
-  toast('Flashing RCP... this takes ~30s');
-  const r=await api('rcp/reflash',{method:'POST'});
-  if(r&&r.ok){toast('RCP re-flashed! Restarting...');setTimeout(()=>restart(),2000);}
-  else toast(r?.error||'RCP flash failed','error');
 }
 </script>
 </body>

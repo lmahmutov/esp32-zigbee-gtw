@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ESP32 Zigbee Gateway — Web Flasher</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#0f1117;--card:#1a1d27;--primary:#4fc3f7;--accent:#03a9f4;--danger:#ef5350;--success:#66bb6a;--warn:#ffa726;--text:#e1e1e1;--text2:#888;--border:#2a2d35}
+html,body{height:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);font-size:14px}
+.container{max-width:720px;margin:0 auto;padding:24px}
+h1{font-size:22px;font-weight:600;margin-bottom:8px}
+.subtitle{color:var(--text2);margin-bottom:24px;font-size:13px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;margin-bottom:16px}
+.card h2{font-size:15px;font-weight:500;margin-bottom:12px;color:var(--primary)}
+.card.done{border-color:var(--success);opacity:.7}
+.card.done h2::after{content:' ✓';color:var(--success)}
+.warning{background:rgba(255,167,38,.1);border:1px solid rgba(255,167,38,.3);border-radius:8px;padding:12px 16px;margin-bottom:16px;color:var(--warn);font-size:13px}
+.info{color:var(--text2);font-size:13px;margin-bottom:12px}
+.files{display:flex;flex-direction:column;gap:6px;margin-bottom:16px}
+.file-row{display:flex;align-items:center;gap:12px;padding:8px 12px;background:rgba(255,255,255,.03);border-radius:6px;font-family:monospace;font-size:13px}
+.file-offset{color:var(--primary);min-width:70px}
+.file-name{flex:1}
+.file-size{color:var(--text2)}
+.file-status{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.file-status.pending{background:#555}
+.file-status.loaded{background:var(--success)}
+.file-status.error{background:var(--danger)}
+.btn{padding:10px 24px;border:none;border-radius:8px;cursor:pointer;font-size:14px;font-weight:500;transition:.15s;display:inline-flex;align-items:center;gap:8px}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.btn-primary{background:var(--accent);color:#fff}
+.btn-primary:hover:not(:disabled){background:#0288d1}
+.btn-danger{background:var(--danger);color:#fff}
+.btn-danger:hover:not(:disabled){background:#d32f2f}
+.btn-outline{background:transparent;border:1px solid var(--border);color:var(--text)}
+.btn-outline:hover:not(:disabled){background:rgba(255,255,255,.05)}
+.actions{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+.progress-wrap{margin-top:16px;display:none}
+.progress-bar{background:var(--border);border-radius:4px;overflow:hidden;height:8px}
+.progress-fill{height:100%;background:var(--accent);transition:width .3s;width:0%}
+.progress-text{font-size:12px;color:var(--text2);margin-top:6px}
+.log{background:#0a0c10;border:1px solid var(--border);border-radius:8px;padding:12px;font-family:'Cascadia Code','Fira Code',monospace;font-size:12px;line-height:1.7;max-height:300px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;color:#9b9b9b}
+.log .ok{color:var(--success)}
+.log .err{color:var(--danger)}
+.log .warn{color:var(--warn)}
+.log .info{color:var(--primary)}
+.chip-info{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:16px}
+.chip-item{padding:8px 12px;background:rgba(255,255,255,.03);border-radius:6px;font-size:13px}
+.chip-item span{color:var(--text2);display:block;font-size:11px;margin-bottom:2px}
+.connected .dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px}
+.connected .dot.on{background:var(--success)}
+.connected .dot.off{background:var(--danger)}
+.tabs{display:flex;gap:4px;margin-bottom:20px}
+.tab{flex:1;padding:12px 16px;background:var(--card);border:1px solid var(--border);border-radius:8px;cursor:pointer;text-align:center;font-size:14px;font-weight:500;transition:.15s}
+.tab:hover{background:rgba(255,255,255,.05)}
+.tab.active{border-color:var(--accent);color:var(--primary)}
+.tab.done{border-color:var(--success);color:var(--success)}
+.tab .chip-label{font-size:11px;color:var(--text2);margin-top:2px}
+.tab.active .chip-label{color:var(--primary)}
+.tab.done .chip-label{color:var(--success)}
+.panel{display:none}
+.panel.active{display:block}
+.checkbox-row{display:flex;align-items:center;gap:8px;margin-bottom:12px;font-size:13px;color:var(--text2)}
+.checkbox-row input{accent-color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>ESP32 Zigbee Gateway — Web Flasher</h1>
+  <p class="subtitle">Flash firmware to ESP32-S3 (gateway) and ESP32-H2 (NCP) sequentially via USB. Requires Chrome/Edge.</p>
+
+  <div class="warning">
+    Before flashing each chip: hold BOOT button, press RESET, then release BOOT to enter download mode.
+  </div>
+
+  <div class="tabs">
+    <div class="tab active" id="tabS3" onclick="switchTab('s3')">
+      ESP32-S3
+      <div class="chip-label">Gateway Firmware</div>
+    </div>
+    <div class="tab" id="tabH2" onclick="switchTab('h2')">
+      ESP32-H2
+      <div class="chip-label">NCP Firmware</div>
+    </div>
+  </div>
+
+  <!-- S3 Panel -->
+  <div class="panel active" id="panelS3">
+    <div class="card">
+      <h2>Connect ESP32-S3</h2>
+      <div class="connected" id="connStatusS3"><span class="dot off"></span>Not connected</div>
+      <div class="chip-info" id="chipInfoS3" style="display:none"></div>
+      <div class="actions" style="margin-top:12px">
+        <button class="btn btn-primary" id="btnConnectS3" onclick="doConnect('s3')">Connect to ESP32-S3</button>
+        <button class="btn btn-outline" id="btnDisconnectS3" onclick="doDisconnect('s3')" style="display:none">Disconnect</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Firmware Files</h2>
+      <p class="info">ESP32-S3 gateway firmware — 4MB flash, DIO mode.</p>
+      <div class="files" id="fileListS3"></div>
+      <div class="checkbox-row">
+        <input type="checkbox" id="chkEraseS3" checked>
+        <label for="chkEraseS3">Erase flash before writing (recommended for clean install)</label>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Flash</h2>
+      <div class="actions">
+        <button class="btn btn-primary" id="btnFlashS3" onclick="doFlash('s3')" disabled>Flash ESP32-S3</button>
+        <button class="btn btn-danger" id="btnEraseS3" onclick="doEraseOnly('s3')" disabled>Erase Flash Only</button>
+      </div>
+      <div class="progress-wrap" id="progressWrapS3">
+        <div class="progress-bar"><div class="progress-fill" id="progressFillS3"></div></div>
+        <div class="progress-text" id="progressTextS3">Ready</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- H2 Panel -->
+  <div class="panel" id="panelH2">
+    <div class="card">
+      <h2>Connect ESP32-H2</h2>
+      <div class="connected" id="connStatusH2"><span class="dot off"></span>Not connected</div>
+      <div class="chip-info" id="chipInfoH2" style="display:none"></div>
+      <div class="actions" style="margin-top:12px">
+        <button class="btn btn-primary" id="btnConnectH2" onclick="doConnect('h2')">Connect to ESP32-H2</button>
+        <button class="btn btn-outline" id="btnDisconnectH2" onclick="doDisconnect('h2')" style="display:none">Disconnect</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Firmware Files</h2>
+      <p class="info">ESP32-H2 NCP (Zigbee coordinator) firmware — 2MB flash, DIO mode.</p>
+      <div class="files" id="fileListH2"></div>
+      <div class="checkbox-row">
+        <input type="checkbox" id="chkEraseH2" checked>
+        <label for="chkEraseH2">Erase flash before writing (recommended for clean install)</label>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Flash</h2>
+      <div class="actions">
+        <button class="btn btn-primary" id="btnFlashH2" onclick="doFlash('h2')" disabled>Flash ESP32-H2</button>
+        <button class="btn btn-danger" id="btnEraseH2" onclick="doEraseOnly('h2')" disabled>Erase Flash Only</button>
+      </div>
+      <div class="progress-wrap" id="progressWrapH2">
+        <div class="progress-bar"><div class="progress-fill" id="progressFillH2"></div></div>
+        <div class="progress-text" id="progressTextH2">Ready</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Log</h2>
+    <div class="log" id="log"></div>
+  </div>
+</div>
+
+<script type="module">
+import { ESPLoader, Transport } from 'https://unpkg.com/esptool-js@0.5.4/bundle.js';
+
+const CHIPS = {
+  s3: {
+    label: 'ESP32-S3',
+    flashSize: '4MB',
+    flashMode: 'dio',
+    flashFreq: '80m',
+    files: [
+      { name: 'bootloader.bin',      offset: 0x0,     url: '/firmware/s3/bootloader.bin' },
+      { name: 'partition-table.bin',  offset: 0x8000,  url: '/firmware/s3/partition-table.bin' },
+      { name: 'ota_data_initial.bin', offset: 0xf000,  url: '/firmware/s3/ota_data_initial.bin' },
+      { name: 'zigbee-gateway.bin',   offset: 0x20000, url: '/firmware/s3/zigbee-gateway.bin' },
+    ],
+  },
+  h2: {
+    label: 'ESP32-H2',
+    flashSize: '2MB',
+    flashMode: 'dio',
+    flashFreq: '48m',
+    files: [
+      { name: 'bootloader.bin',       offset: 0x0,     url: '/firmware/h2/bootloader.bin' },
+      { name: 'partition-table.bin',   offset: 0x8000,  url: '/firmware/h2/partition-table.bin' },
+      { name: 'esp_zigbee_ncp.bin',    offset: 0x20000, url: '/firmware/h2/esp_zigbee_ncp.bin' },
+    ],
+  },
+};
+
+const state = {
+  s3: { esploader: null, transport: null, fileData: {}, connected: false, flashed: false },
+  h2: { esploader: null, transport: null, fileData: {}, connected: false, flashed: false },
+};
+
+/* ── Log ───────────────────────────────────── */
+const logEl = document.getElementById('log');
+function log(msg, cls = '') {
+  const span = document.createElement('span');
+  span.className = cls;
+  span.textContent = msg + '\n';
+  logEl.appendChild(span);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+/* ── Tabs ──────────────────────────────────── */
+window.switchTab = function(chip) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.getElementById('tab' + chip.toUpperCase()).classList.add('active');
+  document.getElementById('panel' + chip.toUpperCase()).classList.add('active');
+};
+
+function markTabDone(chip) {
+  const tab = document.getElementById('tab' + chip.toUpperCase());
+  tab.classList.add('done');
+}
+
+/* ── UI helpers ────────────────────────────── */
+function ucChip(chip) { return chip.toUpperCase(); }
+
+function updateConnStatus(chip, on, text) {
+  const el = document.getElementById('connStatus' + ucChip(chip));
+  el.innerHTML = `<span class="dot ${on ? 'on' : 'off'}"></span>${text}`;
+  state[chip].connected = on;
+  document.getElementById('btnConnect' + ucChip(chip)).style.display = on ? 'none' : '';
+  document.getElementById('btnDisconnect' + ucChip(chip)).style.display = on ? '' : 'none';
+  updateFlashBtn(chip);
+}
+
+function updateFlashBtn(chip) {
+  const cfg = CHIPS[chip];
+  const allLoaded = cfg.files.every(f => state[chip].fileData[f.name]);
+  document.getElementById('btnFlash' + ucChip(chip)).disabled = !state[chip].connected || !allLoaded;
+  document.getElementById('btnErase' + ucChip(chip)).disabled = !state[chip].connected;
+}
+
+function setProgress(chip, pct, text) {
+  document.getElementById('progressWrap' + ucChip(chip)).style.display = 'block';
+  document.getElementById('progressFill' + ucChip(chip)).style.width = pct + '%';
+  document.getElementById('progressText' + ucChip(chip)).textContent = text;
+}
+
+/* ── Load firmware files ───────────────────── */
+function renderFiles(chip) {
+  const cfg = CHIPS[chip];
+  const el = document.getElementById('fileList' + ucChip(chip));
+  el.innerHTML = cfg.files.map(f => {
+    const loaded = state[chip].fileData[f.name];
+    const size = loaded ? (loaded.byteLength / 1024).toFixed(1) + ' KB' : '...';
+    const status = loaded ? 'loaded' : (loaded === false ? 'error' : 'pending');
+    return `<div class="file-row">
+      <span class="file-status ${status}"></span>
+      <span class="file-offset">0x${f.offset.toString(16).padStart(6, '0')}</span>
+      <span class="file-name">${f.name}</span>
+      <span class="file-size">${size}</span>
+    </div>`;
+  }).join('');
+}
+
+async function loadFirmwareFiles(chip) {
+  const cfg = CHIPS[chip];
+  log(`[${cfg.label}] Loading firmware files...`, 'info');
+  renderFiles(chip);
+  for (const f of cfg.files) {
+    try {
+      const resp = await fetch(f.url);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      state[chip].fileData[f.name] = await resp.arrayBuffer();
+      log(`  ${f.name}: ${(state[chip].fileData[f.name].byteLength / 1024).toFixed(1)} KB`, 'ok');
+    } catch (e) {
+      state[chip].fileData[f.name] = false;
+      log(`  ${f.name}: FAILED (${e.message})`, 'err');
+    }
+    renderFiles(chip);
+  }
+  const loaded = cfg.files.filter(f => state[chip].fileData[f.name]).length;
+  log(`[${cfg.label}] ${loaded}/${cfg.files.length} files loaded`, loaded === cfg.files.length ? 'ok' : 'warn');
+  updateFlashBtn(chip);
+}
+
+/* ── Connect ───────────────────────────────── */
+window.doConnect = async function(chip) {
+  const cfg = CHIPS[chip];
+  try {
+    log(`[${cfg.label}] Requesting serial port...`, 'info');
+    const port = await navigator.serial.requestPort({
+      filters: [{ usbVendorId: 0x303a }],
+    });
+    state[chip].transport = new Transport(port, true);
+    log(`[${cfg.label}] Connecting...`, 'info');
+
+    const flashOptions = {
+      transport: state[chip].transport,
+      baudrate: 460800,
+      romBaudrate: 115200,
+    };
+    state[chip].esploader = new ESPLoader(flashOptions);
+    const detectedChip = await state[chip].esploader.main();
+
+    log(`[${cfg.label}] Connected: ${detectedChip}`, 'ok');
+    updateConnStatus(chip, true, `Connected: ${detectedChip}`);
+
+    try {
+      const mac = await state[chip].esploader.readMac();
+      const info = document.getElementById('chipInfo' + ucChip(chip));
+      info.style.display = 'grid';
+      info.innerHTML = `
+        <div class="chip-item"><span>Chip</span>${detectedChip}</div>
+        <div class="chip-item"><span>MAC</span>${mac}</div>
+      `;
+    } catch (e) {}
+
+  } catch (e) {
+    log(`[${cfg.label}] Connection failed: ${e.message}`, 'err');
+    updateConnStatus(chip, false, 'Connection failed');
+  }
+};
+
+/* ── Disconnect ────────────────────────────── */
+window.doDisconnect = async function(chip) {
+  const cfg = CHIPS[chip];
+  try {
+    if (state[chip].transport) await state[chip].transport.disconnect();
+  } catch (e) {}
+  state[chip].esploader = null;
+  state[chip].transport = null;
+  updateConnStatus(chip, false, 'Disconnected');
+  document.getElementById('chipInfo' + ucChip(chip)).style.display = 'none';
+  log(`[${cfg.label}] Disconnected`, 'info');
+};
+
+/* ── Flash ─────────────────────────────────── */
+window.doFlash = async function(chip) {
+  const cfg = CHIPS[chip];
+  const s = state[chip];
+  if (!s.esploader) return;
+  const btn = document.getElementById('btnFlash' + ucChip(chip));
+  btn.disabled = true;
+
+  try {
+    const eraseAll = document.getElementById('chkErase' + ucChip(chip)).checked;
+
+    if (eraseAll) {
+      log(`[${cfg.label}] Erasing entire flash...`, 'warn');
+      setProgress(chip, 0, 'Erasing flash...');
+      await s.esploader.eraseFlash();
+      log(`[${cfg.label}] Flash erased`, 'ok');
+    }
+
+    const flashFiles = cfg.files.filter(f => s.fileData[f.name]).map(f => ({
+      data: binaryToStr(new Uint8Array(s.fileData[f.name])),
+      address: f.offset,
+    }));
+
+    log(`[${cfg.label}] Flashing ${flashFiles.length} files...`, 'info');
+
+    const totalSize = flashFiles.reduce((sum, f) => sum + f.data.length, 0);
+
+    await s.esploader.writeFlash({
+      fileArray: flashFiles,
+      flashSize: cfg.flashSize,
+      flashMode: cfg.flashMode,
+      flashFreq: cfg.flashFreq,
+      eraseAll: false,
+      compress: true,
+      reportProgress: (fileIndex, w, total) => {
+        const prevFiles = flashFiles.slice(0, fileIndex).reduce((sum, f) => sum + f.data.length, 0);
+        const pct = Math.round((prevFiles + w) / totalSize * 100);
+        setProgress(chip, pct, `Flashing ${cfg.files[fileIndex].name}... ${pct}%`);
+      },
+    });
+
+    setProgress(chip, 100, 'Flash complete!');
+    log(`[${cfg.label}] Flash complete! Resetting...`, 'ok');
+
+    try { await s.esploader.hardReset(); } catch (e) {}
+    log(`[${cfg.label}] Device reset. Done!`, 'ok');
+
+    s.flashed = true;
+    markTabDone(chip);
+
+    /* Auto-switch to next chip if not done */
+    const other = chip === 's3' ? 'h2' : 's3';
+    if (!state[other].flashed) {
+      log(`\nNow switch to ${CHIPS[other].label}. Plug it in via USB and enter download mode.`, 'warn');
+      setTimeout(() => switchTab(other), 500);
+    } else {
+      log('\nBoth chips flashed successfully!', 'ok');
+    }
+
+  } catch (e) {
+    log(`[${cfg.label}] Flash failed: ${e.message}`, 'err');
+    setProgress(chip, 0, 'Flash failed');
+  }
+  btn.disabled = false;
+  updateFlashBtn(chip);
+};
+
+/* ── Erase only ────────────────────────────── */
+window.doEraseOnly = async function(chip) {
+  const cfg = CHIPS[chip];
+  const s = state[chip];
+  if (!s.esploader) return;
+  const btn = document.getElementById('btnErase' + ucChip(chip));
+  btn.disabled = true;
+  try {
+    log(`[${cfg.label}] Erasing entire flash...`, 'warn');
+    setProgress(chip, 0, 'Erasing...');
+    await s.esploader.eraseFlash();
+    setProgress(chip, 100, 'Erase complete');
+    log(`[${cfg.label}] Flash erased`, 'ok');
+  } catch (e) {
+    log(`[${cfg.label}] Erase failed: ${e.message}`, 'err');
+  }
+  btn.disabled = false;
+  updateFlashBtn(chip);
+};
+
+/* ── Utility ───────────────────────────────── */
+function binaryToStr(u8arr) {
+  let str = '';
+  for (let i = 0; i < u8arr.length; i++) str += String.fromCharCode(u8arr[i]);
+  return str;
+}
+
+/* ── Init ──────────────────────────────────── */
+if (!('serial' in navigator)) {
+  log('ERROR: Web Serial API not supported. Use Chrome or Edge.', 'err');
+  document.getElementById('btnConnectS3').disabled = true;
+  document.getElementById('btnConnectH2').disabled = true;
+} else {
+  loadFirmwareFiles('s3');
+  loadFirmwareFiles('h2');
+}
+</script>
+</body>
+</html>

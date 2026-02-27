@@ -1,4 +1,5 @@
 #include "wifi.h"
+#include "dns_server.h"
 
 #include <string.h>
 #include "esp_log.h"
@@ -169,6 +170,7 @@ void wifi_start_ap(void)
     s_status.state = WIFI_STATE_AP_ACTIVE;
 
     ESP_LOGI(TAG, "AP started: %s (192.168.4.1, WPA2)", ap_ssid);
+    dns_server_start();
     start_mdns();
 }
 

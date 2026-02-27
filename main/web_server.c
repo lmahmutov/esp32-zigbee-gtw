@@ -4,6 +4,7 @@
 #include "zigbee.h"
 #include "device_list.h"
 #include "device_defs.h"
+#include "automation.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -26,6 +27,10 @@ extern const char *FW_VERSION;
 /* Embedded index.html */
 extern const char index_html_start[] asm("_binary_index_html_start");
 extern const char index_html_end[]   asm("_binary_index_html_end");
+
+/* Embedded gzipped Blockly JS */
+extern const uint8_t blockly_js_gz_start[] asm("_binary_blockly_js_gz_start");
+extern const uint8_t blockly_js_gz_end[]   asm("_binary_blockly_js_gz_end");
 
 /* ── HTTP Basic Auth ─────────────────────────────────────── */
 
@@ -121,6 +126,18 @@ static esp_err_t handler_index(httpd_req_t *req)
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
     httpd_resp_send(req, index_html_start, index_html_end - index_html_start);
+    return ESP_OK;
+}
+
+/* ── GET /blockly.js — serve embedded gzipped Blockly ── */
+
+static esp_err_t handler_blockly_js(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "application/javascript");
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    httpd_resp_set_hdr(req, "Cache-Control", "public, max-age=86400");
+    httpd_resp_send(req, (const char *)blockly_js_gz_start,
+                    blockly_js_gz_end - blockly_js_gz_start);
     return ESP_OK;
 }
 
@@ -409,22 +426,6 @@ static esp_err_t handler_zigbee_settings(httpd_req_t *req)
     return ESP_OK;
 }
 
-/* ── POST /api/rcp/reflash ────────────────────────────── */
-
-static esp_err_t handler_rcp_reflash(httpd_req_t *req)
-{
-    REQUIRE_AUTH(req);
-    ESP_LOGW(TAG, "RCP re-flash requested — restarting to trigger auto-update");
-    cJSON *resp = cJSON_CreateObject();
-    cJSON_AddBoolToObject(resp, "ok", true);
-    cJSON_AddStringToObject(resp, "message", "Restarting to re-flash RCP...");
-    send_json(req, resp);
-
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    esp_restart();
-    return ESP_OK;
-}
-
 /* ── GET /api/logs ────────────────────────────────────── */
 
 static esp_err_t handler_logs(httpd_req_t *req)
@@ -470,7 +471,7 @@ static esp_err_t handler_ota(httpd_req_t *req)
         return send_error(req, 500, "OTA begin failed");
     }
 
-    char *buf = malloc(4096);
+    char *buf = malloc(8192);
     if (!buf) {
         esp_ota_abort(ota_handle);
         return send_error(req, 500, "Out of memory");
@@ -482,7 +483,7 @@ static esp_err_t handler_ota(httpd_req_t *req)
     int timeout_retries = 0;
 
     while (remaining > 0) {
-        int to_read = remaining < 4096 ? remaining : 4096;
+        int to_read = remaining < 8192 ? remaining : 8192;
         int ret = httpd_req_recv(req, buf, to_read);
         if (ret <= 0) {
             if (ret == HTTPD_SOCK_ERR_TIMEOUT && ++timeout_retries < 30) continue;
@@ -629,6 +630,216 @@ static esp_err_t handler_password(httpd_req_t *req)
     return send_json(req, resp);
 }
 
+/* ── Automation API ────────────────────────────────────── */
+
+/* Helper to receive JSON body into a heap buffer */
+static char *recv_body(httpd_req_t *req, int max_len)
+{
+    if (req->content_len <= 0 || req->content_len > max_len) return NULL;
+    char *buf = malloc(req->content_len + 1);
+    if (!buf) return NULL;
+    int received = 0, retries = 0;
+    while (received < req->content_len) {
+        int ret = httpd_req_recv(req, buf + received, req->content_len - received);
+        if (ret <= 0) {
+            if (ret == HTTPD_SOCK_ERR_TIMEOUT && ++retries < 10) continue;
+            free(buf);
+            return NULL;
+        }
+        retries = 0;
+        received += ret;
+    }
+    buf[received] = '\0';
+    return buf;
+}
+
+/* GET /api/automations — list scripts, or ?id=xxx for single script */
+static esp_err_t handler_automations_get(httpd_req_t *req)
+{
+    /* Check for ?id=xxx query parameter */
+    char query[64] = {0};
+    char id[AUTO_ID_LEN] = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        httpd_query_key_value(query, "id", id, sizeof(id));
+    }
+
+    if (id[0]) {
+        /* Single script */
+        auto_script_meta_t meta;
+        char *lua_code = malloc(4096);
+        char *blockly_xml = malloc(8192);
+        if (!lua_code || !blockly_xml) {
+            free(lua_code); free(blockly_xml);
+            return send_error(req, 500, "Out of memory");
+        }
+        lua_code[0] = 0;
+        blockly_xml[0] = 0;
+
+        if (!automation_get_script(id, lua_code, 4096, blockly_xml, 8192, &meta)) {
+            free(lua_code); free(blockly_xml);
+            return send_error(req, 400, "Script not found");
+        }
+
+        cJSON *obj = cJSON_CreateObject();
+        cJSON_AddStringToObject(obj, "id", meta.id);
+        cJSON_AddStringToObject(obj, "name", meta.name);
+        cJSON_AddBoolToObject(obj, "enabled", meta.enabled);
+        cJSON_AddBoolToObject(obj, "running", meta.running);
+        cJSON_AddStringToObject(obj, "lua_code", lua_code);
+        cJSON_AddStringToObject(obj, "blockly_xml", blockly_xml);
+        free(lua_code); free(blockly_xml);
+        return send_json(req, obj);
+    }
+
+    /* List all scripts */
+    auto_script_meta_t scripts[AUTO_MAX_SCRIPTS];
+    int count = automation_list_scripts(scripts, AUTO_MAX_SCRIPTS);
+
+    cJSON *arr = cJSON_CreateArray();
+    for (int i = 0; i < count; i++) {
+        cJSON *obj = cJSON_CreateObject();
+        cJSON_AddStringToObject(obj, "id", scripts[i].id);
+        cJSON_AddStringToObject(obj, "name", scripts[i].name);
+        cJSON_AddBoolToObject(obj, "enabled", scripts[i].enabled);
+        cJSON_AddBoolToObject(obj, "running", scripts[i].running);
+        cJSON_AddItemToArray(arr, obj);
+    }
+    return send_json(req, arr);
+}
+
+/* POST /api/automations — create/update script */
+static esp_err_t handler_automations_save(httpd_req_t *req)
+{
+    REQUIRE_AUTH(req);
+    char *buf = recv_body(req, 16384);
+    if (!buf) return send_error(req, 400, "Invalid body");
+
+    cJSON *json = cJSON_Parse(buf);
+    free(buf);
+    if (!json) return send_error(req, 400, "Invalid JSON");
+
+    cJSON *j_id   = cJSON_GetObjectItem(json, "id");
+    cJSON *j_name = cJSON_GetObjectItem(json, "name");
+    cJSON *j_code = cJSON_GetObjectItem(json, "lua_code");
+    cJSON *j_xml  = cJSON_GetObjectItem(json, "blockly_xml");
+    cJSON *j_en   = cJSON_GetObjectItem(json, "enabled");
+
+    if (!j_id || !cJSON_IsString(j_id) || !j_id->valuestring[0]) {
+        cJSON_Delete(json);
+        return send_error(req, 400, "Missing id");
+    }
+
+    bool enabled = j_en && cJSON_IsTrue(j_en);
+
+    bool ok = automation_save_script(
+        j_id->valuestring,
+        (j_name && cJSON_IsString(j_name)) ? j_name->valuestring : j_id->valuestring,
+        (j_code && cJSON_IsString(j_code)) ? j_code->valuestring : "",
+        (j_xml  && cJSON_IsString(j_xml))  ? j_xml->valuestring  : "",
+        enabled
+    );
+    cJSON_Delete(json);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "ok", ok);
+    return send_json(req, resp);
+}
+
+/* POST /api/automations/delete */
+static esp_err_t handler_automations_delete(httpd_req_t *req)
+{
+    REQUIRE_AUTH(req);
+    char *buf = recv_body(req, 256);
+    if (!buf) return send_error(req, 400, "Invalid body");
+
+    cJSON *json = cJSON_Parse(buf);
+    free(buf);
+    if (!json) return send_error(req, 400, "Invalid JSON");
+
+    cJSON *j_id = cJSON_GetObjectItem(json, "id");
+    if (!j_id || !cJSON_IsString(j_id)) {
+        cJSON_Delete(json);
+        return send_error(req, 400, "Missing id");
+    }
+
+    bool ok = automation_delete_script(j_id->valuestring);
+    cJSON_Delete(json);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "ok", ok);
+    return send_json(req, resp);
+}
+
+/* POST /api/automations/toggle */
+static esp_err_t handler_automations_toggle(httpd_req_t *req)
+{
+    REQUIRE_AUTH(req);
+    char *buf = recv_body(req, 256);
+    if (!buf) return send_error(req, 400, "Invalid body");
+
+    cJSON *json = cJSON_Parse(buf);
+    free(buf);
+    if (!json) return send_error(req, 400, "Invalid JSON");
+
+    cJSON *j_id = cJSON_GetObjectItem(json, "id");
+    if (!j_id || !cJSON_IsString(j_id)) {
+        cJSON_Delete(json);
+        return send_error(req, 400, "Missing id");
+    }
+
+    bool ok = automation_toggle_script(j_id->valuestring);
+    cJSON_Delete(json);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "ok", ok);
+    return send_json(req, resp);
+}
+
+/* POST /api/automations/run — test-run a saved script */
+static esp_err_t handler_automations_run(httpd_req_t *req)
+{
+    REQUIRE_AUTH(req);
+    char *buf = recv_body(req, 8192);
+    if (!buf) return send_error(req, 400, "Invalid body");
+
+    cJSON *json = cJSON_Parse(buf);
+    free(buf);
+    if (!json) return send_error(req, 400, "Invalid JSON");
+
+    char *logs = NULL;
+    cJSON *j_id   = cJSON_GetObjectItem(json, "id");
+    cJSON *j_code = cJSON_GetObjectItem(json, "lua_code");
+
+    if (j_code && cJSON_IsString(j_code) && j_code->valuestring[0]) {
+        /* Inline code execution */
+        logs = automation_run_inline(j_code->valuestring);
+    } else if (j_id && cJSON_IsString(j_id)) {
+        /* Run saved script */
+        logs = automation_run_test(j_id->valuestring);
+    } else {
+        cJSON_Delete(json);
+        return send_error(req, 400, "Missing id or lua_code");
+    }
+    cJSON_Delete(json);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "ok", logs != NULL);
+    cJSON_AddStringToObject(resp, "logs", logs ? logs : "Script not found");
+    free(logs);
+    return send_json(req, resp);
+}
+
+/* ── Captive portal: redirect unknown paths to / ──────── */
+
+static esp_err_t captive_redirect_handler(httpd_req_t *req, httpd_err_code_t err)
+{
+    httpd_resp_set_status(req, "302 Temporary Redirect");
+    httpd_resp_set_hdr(req, "Location", "/");
+    /* iOS requires body to detect captive portal */
+    httpd_resp_send(req, "Redirect to captive portal", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
 /* ── Server startup ───────────────────────────────────── */
 
 static void register_uri(httpd_handle_t server, httpd_method_t method,
@@ -649,7 +860,7 @@ esp_err_t web_server_start(void)
     auth_load_password();
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 19;
+    config.max_uri_handlers = 25;
     config.stack_size = 8192;
     config.lru_purge_enable = true;
     config.close_fn = session_close_fn;
@@ -664,6 +875,7 @@ esp_err_t web_server_start(void)
     ws_init(s_server);
 
     register_uri(s_server, HTTP_GET,  "/",                   handler_index);
+    register_uri(s_server, HTTP_GET,  "/blockly.js",         handler_blockly_js);
     register_uri(s_server, HTTP_GET,  "/api/status",         handler_status);
     register_uri(s_server, HTTP_GET,  "/api/devices",        handler_devices);
     register_uri(s_server, HTTP_GET,  "/api/logs",           handler_logs);
@@ -678,8 +890,18 @@ esp_err_t web_server_start(void)
     register_uri(s_server, HTTP_POST, "/api/settings/password", handler_password);
     register_uri(s_server, HTTP_POST, "/api/system/restart",  handler_restart);
     register_uri(s_server, HTTP_POST, "/api/system/factory-reset", handler_factory_reset);
-    register_uri(s_server, HTTP_POST, "/api/rcp/reflash",     handler_rcp_reflash);
+    /* RCP reflash removed — NCP has its own USB port for flashing */
     register_uri(s_server, HTTP_POST, "/api/ota",             handler_ota);
+
+    /* Automation */
+    register_uri(s_server, HTTP_GET,  "/api/automations",        handler_automations_get);
+    register_uri(s_server, HTTP_POST, "/api/automations",        handler_automations_save);
+    register_uri(s_server, HTTP_POST, "/api/automations/delete", handler_automations_delete);
+    register_uri(s_server, HTTP_POST, "/api/automations/toggle", handler_automations_toggle);
+    register_uri(s_server, HTTP_POST, "/api/automations/run",    handler_automations_run);
+
+    /* Captive portal: redirect any 404 to root page */
+    httpd_register_err_handler(s_server, HTTPD_404_NOT_FOUND, captive_redirect_handler);
 
     ESP_LOGI(TAG, "HTTP server started (WebSocket enabled)");
     return ESP_OK;

@@ -10,7 +10,7 @@
 #include "freertos/semphr.h"
 
 static const char *TAG = "devdefs";
-static const char *DEFS_PATH = "/rcp_fw/devices.json";
+static const char *DEFS_PATH = "/storage/devices.json";
 
 static device_def_t s_defs[MAX_DEVICE_DEFS];
 static int s_def_count;
@@ -20,11 +20,11 @@ static SemaphoreHandle_t s_defs_mutex;
 
 static void ensure_spiffs(void)
 {
-    if (esp_spiffs_mounted("rcp_fw")) return;
+    if (esp_spiffs_mounted("storage")) return;
 
     esp_vfs_spiffs_conf_t conf = {
-        .base_path = "/rcp_fw",
-        .partition_label = "rcp_fw",
+        .base_path = "/storage",
+        .partition_label = "storage",
         .max_files = 10,
         .format_if_mount_failed = true,
     };
@@ -146,20 +146,21 @@ void device_defs_init(void)
 
 /* ── Find ─────────────────────────────────────────────── */
 
-const device_def_t *device_defs_find(const char *manufacturer, const char *model)
+bool device_defs_find(const char *manufacturer, const char *model, device_def_t *out)
 {
-    if (!manufacturer || !model) return NULL;
+    if (!manufacturer || !model) return false;
     xSemaphoreTake(s_defs_mutex, portMAX_DELAY);
-    const device_def_t *result = NULL;
+    bool found = false;
     for (int i = 0; i < s_def_count; i++) {
         if (strcmp(s_defs[i].manufacturer, manufacturer) == 0 &&
             strcmp(s_defs[i].model, model) == 0) {
-            result = &s_defs[i];
+            if (out) *out = s_defs[i];
+            found = true;
             break;
         }
     }
     xSemaphoreGive(s_defs_mutex);
-    return result;
+    return found;
 }
 
 /* ── Save ─────────────────────────────────────────────── */

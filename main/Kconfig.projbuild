@@ -36,33 +36,3 @@ menu "Zigbee Gateway Configuration"
             Can be changed at runtime via web UI (stored in NVS).
 
 endmenu
-
-menu "ESP Zigbee gateway rcp update"
-    depends on ZB_RADIO_SPINEL_UART
-
-    menu "Board Configuration"
-        config PIN_TO_RCP_RESET
-            int "Pin to RCP reset"
-            default 7
-
-        config PIN_TO_RCP_BOOT
-            int "Pin to RCP boot"
-            default 8
-
-        config PIN_TO_RCP_TX
-            int "Pin to RCP TX"
-            default 17
-
-        config PIN_TO_RCP_RX
-            int "Pin to RCP RX"
-            default 18
-    endmenu
-
-    config ZIGBEE_GW_AUTO_UPDATE_RCP
-        bool "Update RCP automatically"
-        default y
-        help
-            If enabled, the gateway stores the RCP image in SPIFFS and
-            compares versions on boot. RCP is updated on mismatch.
-
-endmenu

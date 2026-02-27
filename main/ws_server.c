@@ -132,6 +132,15 @@ cJSON *ws_build_device_json(const zb_device_t *d)
     cJSON_AddStringToObject(obj, "model", d->model);
     cJSON_AddNumberToObject(obj, "lqi", d->lqi);
     cJSON_AddBoolToObject(obj, "discovery_done", d->discovery_done);
+    if (d->has_battery) {
+        cJSON_AddNumberToObject(obj, "battery_mv", d->battery_mv);
+        /* Rough percentage: 3100mV=100%, 2700mV=0% for CR2032 */
+        int pct = (d->battery_mv - 2700) * 100 / 400;
+        if (pct > 100) pct = 100;
+        if (pct < 0) pct = 0;
+        cJSON_AddNumberToObject(obj, "battery_pct", pct);
+        cJSON_AddNumberToObject(obj, "device_temp", d->device_temp);
+    }
 
     int64_t now = esp_timer_get_time() / 1000000;
     int64_t ago = d->last_seen_sec > 0 ? now - d->last_seen_sec : -1;
@@ -308,20 +317,32 @@ static void ws_log_flush_fn(void *arg)
 static void log_timer_cb(void *arg)
 {
     (void)arg;
+
+    /* Snapshot length under spinlock, then malloc outside it */
     portENTER_CRITICAL(&s_ws_log_mux);
-    if (s_ws_log_len == 0) {
-        portEXIT_CRITICAL(&s_ws_log_mux);
-        return;
-    }
-    char *copy = malloc(s_ws_log_len + 1);
-    if (copy) {
-        memcpy(copy, s_ws_log_buf, s_ws_log_len);
-        copy[s_ws_log_len] = '\0';
-    }
-    s_ws_log_len = 0;
+    size_t len = s_ws_log_len;
     portEXIT_CRITICAL(&s_ws_log_mux);
 
-    if (copy && s_hd) {
+    if (len == 0) return;
+
+    char *copy = malloc(len + 1);
+    if (!copy) return;
+
+    portENTER_CRITICAL(&s_ws_log_mux);
+    /* Buffer may have grown — only copy what we allocated for */
+    if (s_ws_log_len <= len) {
+        len = s_ws_log_len;
+        memcpy(copy, s_ws_log_buf, len);
+        s_ws_log_len = 0;
+    } else {
+        memcpy(copy, s_ws_log_buf, len);
+        memmove(s_ws_log_buf, s_ws_log_buf + len, s_ws_log_len - len);
+        s_ws_log_len -= len;
+    }
+    portEXIT_CRITICAL(&s_ws_log_mux);
+    copy[len] = '\0';
+
+    if (len > 0 && s_hd) {
         if (httpd_queue_work(s_hd, ws_log_flush_fn, copy) != ESP_OK) {
             free(copy);
         }
@@ -476,12 +497,12 @@ void ws_notify_permit_join(bool active, uint8_t remaining)
 void ws_notify_log(const char *text, int len)
 {
     if (!s_hd || len <= 0) return;
-    portENTER_CRITICAL(&s_ws_log_mux);
+    portENTER_CRITICAL_SAFE(&s_ws_log_mux);
     int avail = WS_LOG_BUF_SIZE - (int)s_ws_log_len;
     if (len > avail) len = avail;
     if (len > 0) {
         memcpy(s_ws_log_buf + s_ws_log_len, text, len);
         s_ws_log_len += len;
     }
-    portEXIT_CRITICAL(&s_ws_log_mux);
+    portEXIT_CRITICAL_SAFE(&s_ws_log_mux);
 }

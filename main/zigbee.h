@@ -11,13 +11,6 @@
 #define GW_MAX_CHILDREN            32
 #define GW_INSTALLCODE_POLICY      false
 
-#define RCP_VERSION_MAX_SIZE       80
-
-#define HOST_RESET_PIN_TO_RCP      CONFIG_PIN_TO_RCP_RESET
-#define HOST_BOOT_PIN_TO_RCP       CONFIG_PIN_TO_RCP_BOOT
-#define HOST_RX_PIN_TO_RCP_TX      CONFIG_PIN_TO_RCP_TX
-#define HOST_TX_PIN_TO_RCP_RX      CONFIG_PIN_TO_RCP_RX
-
 /* Primary channel mask — all channels by default, or specific one from config */
 #if CONFIG_GW_ZIGBEE_CHANNEL >= 11 && CONFIG_GW_ZIGBEE_CHANNEL <= 26
 #define GW_CHANNEL_MASK            (1UL << CONFIG_GW_ZIGBEE_CHANNEL)
@@ -37,44 +30,6 @@
         },                                                  \
     }
 
-#define ESP_ZB_DEFAULT_RADIO_CONFIG()                       \
-    {                                                       \
-        .radio_mode = ZB_RADIO_MODE_UART_RCP,               \
-        .radio_uart_config = {                              \
-            .port = 1,                                      \
-            .uart_config = {                                \
-                .baud_rate  = 460800,                       \
-                .data_bits  = UART_DATA_8_BITS,             \
-                .parity     = UART_PARITY_DISABLE,          \
-                .stop_bits  = UART_STOP_BITS_1,             \
-                .flow_ctrl  = UART_HW_FLOWCTRL_DISABLE,     \
-                .rx_flow_ctrl_thresh = 0,                   \
-                .source_clk = UART_SCLK_DEFAULT,            \
-            },                                              \
-            .rx_pin = HOST_RX_PIN_TO_RCP_TX,                \
-            .tx_pin = HOST_TX_PIN_TO_RCP_RX,                \
-        },                                                  \
-    }
-
-#define ESP_ZB_DEFAULT_HOST_CONFIG()                        \
-    {                                                       \
-        .host_connection_mode = ZB_HOST_CONNECTION_MODE_NONE, \
-    }
-
-#define ESP_ZB_RCP_UPDATE_CONFIG()                          \
-    {                                                       \
-        .rcp_type = RCP_TYPE_ESP32H2_UART,                  \
-        .uart_rx_pin = HOST_RX_PIN_TO_RCP_TX,              \
-        .uart_tx_pin = HOST_TX_PIN_TO_RCP_RX,              \
-        .uart_port = 1,                                     \
-        .uart_baudrate = 115200,                            \
-        .reset_pin = HOST_RESET_PIN_TO_RCP,                \
-        .boot_pin  = HOST_BOOT_PIN_TO_RCP,                 \
-        .update_baudrate = 460800,                          \
-        .firmware_dir = "/rcp_fw/ot_rcp",                   \
-        .target_chip = ESP32H2_CHIP,                        \
-    }
-
 /* ── Public API ────────────────────────────────────────── */
 
 typedef struct {
@@ -90,8 +45,8 @@ typedef struct {
 /* Call from app_main BEFORE zigbee_start() */
 esp_err_t zigbee_platform_init(void);
 
-/* Initialize RCP update subsystem (call after SPIFFS mount) */
-esp_err_t zigbee_rcp_update_init(void);
+/* Reset ESP32-H2 NCP into normal boot mode via GPIO7/GPIO8 */
+esp_err_t zigbee_ncp_reset(void);
 
 /* Create Zigbee task — non-blocking, returns immediately */
 esp_err_t zigbee_start(void);
@@ -108,6 +63,10 @@ void      zigbee_set_channel(uint8_t channel);
 
 /* Erase Zigbee NVRAM and restart — forces fresh network formation */
 void      zigbee_factory_reset(void);
+
+/* Start NCP watchdog — pings NCP every 30s, resets on 2 consecutive timeouts.
+   Call after zigbee_start() completes. */
+void      zigbee_ncp_watchdog_init(void);
 
 /* Copy recent log output into buffer. Returns bytes written. */
 size_t    zigbee_get_log(char *out, size_t max_len);

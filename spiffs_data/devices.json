@@ -1,0 +1,14 @@
+{
+  "LUMI": {
+    "lumi.sensor_magnet.aq2": {
+      "bind": {
+        "1": ["0006"]
+      }
+    },
+    "lumi.sensor_motion.aq2": {
+      "bind": {
+        "1": ["0406", "0400"]
+      }
+    }
+  }
+}

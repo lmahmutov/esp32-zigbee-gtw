@@ -42,6 +42,10 @@ typedef struct {
     uint8_t         lqi;
     int64_t         last_seen_sec;
     bool            discovery_done;
+    bool            has_battery;
+    uint16_t        battery_mv;     /* from Xiaomi 0xFF01 tag 0x01, millivolts */
+    int8_t          device_temp;    /* from Xiaomi 0xFF01 tag 0x03, °C */
+    bool            bind_done;      /* true after successful ZDP bind */
 } zb_device_t;
 
 void     device_list_init(void);

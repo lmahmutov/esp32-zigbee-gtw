@@ -11,16 +11,20 @@
 #include "device_list.h"
 #include "device_defs.h"
 #include "web_server.h"
+#include "automation.h"
 
 static const char *TAG = "main";
 
-const char *FW_VERSION = "0.2.7 (" __DATE__ " " __TIME__ ")";
+const char *FW_VERSION = "0.3.8 (" __DATE__ " " __TIME__ ")";
 
 void app_main(void)
 {
     ESP_LOGI(TAG, "Firmware: %s", FW_VERSION);
 
-    /* Zigbee platform config MUST be called first (sets up radio) */
+    /* Reset H2 NCP first — must boot before host UART starts */
+    ESP_ERROR_CHECK(zigbee_ncp_reset());
+
+    /* Zigbee host platform config (starts UART + host task) */
     ESP_ERROR_CHECK(zigbee_platform_init());
 
     /* NVS */
@@ -83,14 +87,20 @@ void app_main(void)
         esp_ota_mark_app_valid_cancel_rollback();
     }
 
-    /* RCP auto-update subsystem (mounts SPIFFS, inits flasher) */
-    zigbee_rcp_update_init();
-
     /* Device definitions (loads from SPIFFS) */
     device_defs_init();
 
+    /* Automation engine */
+    automation_init();
+
     /* Zigbee coordinator — creates its own task */
     ESP_ERROR_CHECK(zigbee_start());
+
+    /* NCP watchdog — pings NCP periodically, resets on consecutive timeouts */
+    zigbee_ncp_watchdog_init();
+
+    /* Start automation scripts after Zigbee init */
+    automation_start();
 
     ESP_LOGI(TAG, "Zigbee Gateway started");
 }
