@@ -4,13 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Build & Flash
 
-ESP-IDF v5.3.2, target ESP32-S3. SDK location: `/home/lenar/esp32/esp-sdk/esp-idf`
+ESP-IDF v5.3.2, target ESP32-S3.
 
 ```bash
 # Source environment (required before any idf.py command)
-. /home/lenar/esp32/esp-sdk/esp-idf/export.sh
+. $IDF_PATH/export.sh
 
-# Build
+# Build (run from gateway/ directory)
 idf.py build
 
 # Reconfigure (needed after Kconfig changes)
@@ -24,9 +24,6 @@ idf.py monitor -p /dev/ttyUSB0
 
 # Interactive config editor
 idf.py menuconfig
-
-# Deploy to VDS (both OTA and web flasher)
-./deploy.sh
 ```
 
 After adding new Kconfig options, always run `idf.py reconfigure` before building — the cached `sdkconfig` won't pick up new symbols otherwise.
@@ -94,10 +91,3 @@ Device announce → `device_add()` → Active EP request → Simple Descriptor f
 - **NCP blocking calls**: ZDO bind/leave/permit_join can't run concurrently — auto-bind uses a FIFO queue.
 - **Zigbee CH25**: Configured to avoid WiFi CH1 overlap with Zigbee CH11-14.
 - **Factory reset**: `esp_zb_factory_reset()` is unreliable from HTTP handler — use direct `esp_partition_erase_range()` on zb_storage + zb_fct partitions.
-
-## VDS Deployment
-
-Server: `root@77.91.79.32`
-- OTA firmware: `/root/esp-gateway/zigbee-gateway.bin`
-- Web Flasher: `/root/esp-flasher/` (port 8090, systemd `esp-flasher.service`)
-- Firmware binaries: `/root/esp-flasher/firmware/` (s3/ and h2/ — bootloader, partition-table, ota_data, app)

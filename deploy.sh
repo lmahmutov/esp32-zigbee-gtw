@@ -2,12 +2,13 @@
 # Deploy firmware to VDS (both OTA location and web flasher)
 set -e
 
-VDS="root@77.91.79.32"
-GW_BUILD="/home/lenar/esp32/esp32-gateway/build"
-NCP_BUILD="/home/lenar/esp32/esp32-ncp/build"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+VDS="${DEPLOY_SERVER:?Set DEPLOY_SERVER env var (e.g. user@host)}"
+GW_BUILD="$SCRIPT_DIR/gateway/build"
+NCP_BUILD="$SCRIPT_DIR/ncp/build"
 
 # Extract version from main.c
-GW_VER=$(grep -oP '"\K[0-9]+\.[0-9]+\.[0-9]+' /home/lenar/esp32/esp32-gateway/main/main.c | head -1)
+GW_VER=$(grep -oP '"\K[0-9]+\.[0-9]+\.[0-9]+' "$SCRIPT_DIR/gateway/main/main.c" | head -1)
 GW_DATE=$(date -r "$GW_BUILD/zigbee-gateway.bin" '+%Y-%m-%d %H:%M')
 NCP_DATE=""
 NCP_VER="$GW_VER"
@@ -67,6 +68,7 @@ ssh "$VDS" "cat > /root/esp-flasher/firmware/manifest.json" <<EOF
 }
 EOF
 
+DEPLOY_IP=$(echo "$VDS" | sed 's/.*@//')
 echo "=== Done ==="
-echo "OTA:     http://77.91.79.32/esp-gateway/zigbee-gateway.bin"
-echo "Flasher: http://77.91.79.32:8090"
+echo "OTA:     http://$DEPLOY_IP/esp-gateway/zigbee-gateway.bin"
+echo "Flasher: http://$DEPLOY_IP:8090"
