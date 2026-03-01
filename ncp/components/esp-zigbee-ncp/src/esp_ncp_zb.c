@@ -392,7 +392,7 @@ static esp_err_t esp_ncp_zb_write_attr_resp_handler(const esp_zb_zcl_cmd_write_a
             ESP_LOGI(TAG, "status(0x%x), attribute(0x%x)", variables->status, variables->attribute_id);
             length += variables_data_len;
             
-            outbuf = realloc(outbuf, length);
+            { uint8_t *tmp = realloc(outbuf, length); if (!tmp) { free(outbuf); return ESP_ERR_NO_MEM; } outbuf = tmp; }
             memcpy(&outbuf[length - variables_data_len], &variables->status, variables_data_len);
 
             index ++;
@@ -426,7 +426,7 @@ static esp_err_t esp_ncp_zb_report_configure_resp_handler(const esp_zb_zcl_cmd_c
             ESP_LOGI(TAG, "status(0x%x), direction(%d), attribute(0x%x)", variables->status, variables->direction, variables->attribute_id);
             length += variables_data_len;
 
-            outbuf = realloc(outbuf, length);
+            { uint8_t *tmp = realloc(outbuf, length); if (!tmp) { free(outbuf); return ESP_ERR_NO_MEM; } outbuf = tmp; }
             memcpy(&outbuf[length - variables_data_len], &variables->status, variables_data_len);
 
             index ++;
@@ -461,7 +461,7 @@ static esp_err_t esp_ncp_zb_disc_attr_resp_handler(const esp_zb_zcl_cmd_discover
             ESP_LOGI(TAG, "attribute(0x%x), data_type(0x%0x)", variables->attr_id, variables->data_type);
             length += variables_data_len;
             
-            outbuf = realloc(outbuf, length);
+            { uint8_t *tmp = realloc(outbuf, length); if (!tmp) { free(outbuf); return ESP_ERR_NO_MEM; } outbuf = tmp; }
             memcpy(&outbuf[length - variables_data_len], &variables->attr_id, variables_data_len);
 
             index ++;

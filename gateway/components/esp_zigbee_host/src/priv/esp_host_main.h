@@ -19,7 +19,7 @@ extern "C" {
  */
 #define HOST_TASK_STACK       5120
 #define HOST_TASK_PRIORITY    23
-#define HOST_TIMEOUT_MS       10
+#define HOST_TIMEOUT_MS       100
 #define HOST_EVENT_QUEUE_LEN  60
 
 /**

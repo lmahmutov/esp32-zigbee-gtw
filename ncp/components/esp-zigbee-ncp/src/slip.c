@@ -22,7 +22,7 @@ esp_err_t slip_encode(const uint8_t *inbuf, uint16_t inlen, uint8_t **outbuf, ui
      * have accumulated in the receiver due to line noise
      */
     char c = SLIP_END;
-    StreamBufferHandle_t stream_buffer = xStreamBufferCreate(inlen * 2, 8);
+    StreamBufferHandle_t stream_buffer = xStreamBufferCreate(inlen * 2 + 4, 1);
     xStreamBufferSend(stream_buffer, &c, 1, 0);
 
 	/* for each byte in the packet, send the appropriate character
@@ -87,11 +87,13 @@ esp_err_t slip_decode(const uint8_t *inbuf, uint16_t inlen, uint8_t **outbuf, ui
     uint16_t received = 0;
     uint8_t *output = calloc(1, inlen * 2);
 
-    StreamBufferHandle_t stream_buffer = xStreamBufferCreate(inlen, 8);
+    StreamBufferHandle_t stream_buffer = xStreamBufferCreate(inlen + 1, 1);
     xStreamBufferSend(stream_buffer, inbuf, inlen, 0);
 
     while (1) {
-        xStreamBufferReceive(stream_buffer, &c, 1, 100 / portTICK_PERIOD_MS);
+        if (xStreamBufferReceive(stream_buffer, &c, 1, 100 / portTICK_PERIOD_MS) == 0) {
+            goto slip_finish;  /* no more data */
+        }
         switch(c) {
             /* if it's an END character then we're done with
             * the packet
@@ -114,7 +116,9 @@ esp_err_t slip_decode(const uint8_t *inbuf, uint16_t inlen, uint8_t **outbuf, ui
             * what to store in the packet based on that.
             */
             case SLIP_ESC:
-                xStreamBufferReceive(stream_buffer, &c, 1, 100 / portTICK_PERIOD_MS);
+                if (xStreamBufferReceive(stream_buffer, &c, 1, 100 / portTICK_PERIOD_MS) == 0) {
+                    goto slip_finish;  /* truncated escape sequence */
+                }
 
                 /* if "c" is not one of these two, then we
                 * have a protocol violation.  The best bet

@@ -64,6 +64,11 @@ static void esp_host_bus_task(void *pvParameter)
 {
     uart_event_t event;
     uint8_t *dtmp = (uint8_t*)malloc(HOST_BUS_BUF_SIZE);
+    if (!dtmp) {
+        ESP_LOGE(TAG, "bus task: malloc failed");
+        vTaskDelete(NULL);
+        return;
+    }
 
     esp_host_bus_t *bus = (esp_host_bus_t *)pvParameter;
     bus->state = BUS_INIT_START;
@@ -77,16 +82,16 @@ static void esp_host_bus_task(void *pvParameter)
             switch(event.type) {
                 case UART_DATA:
                     host_event.size = uart_read_bytes(CONFIG_HOST_BUS_UART_NUM, dtmp, event.size, portMAX_DELAY);
-                    xStreamBufferSend(bus->input_buf, dtmp, host_event.size, 0);
+                    xStreamBufferSend(bus->input_buf, dtmp, host_event.size, pdMS_TO_TICKS(100));
                     esp_host_send_event(&host_event);
                     break;
                 case UART_FIFO_OVF:
-                    ESP_LOGI(TAG, "hw fifo overflow");
+                    ESP_LOGW(TAG, "hw fifo overflow");
                     uart_flush_input(CONFIG_HOST_BUS_UART_NUM);
                     xQueueReset(uart0_queue);
                     break;
                 case UART_BUFFER_FULL:
-                    ESP_LOGI(TAG, "ring buffer full");
+                    ESP_LOGW(TAG, "ring buffer full");
                     uart_flush_input(CONFIG_HOST_BUS_UART_NUM);
                     xQueueReset(uart0_queue);
                     break;
@@ -155,14 +160,14 @@ esp_err_t esp_host_bus_init(esp_host_bus_t **bus)
         return ESP_ERR_NO_MEM;
     }
 
-    bus_handle->input_buf = xStreamBufferCreate(HOST_BUS_RINGBUF_SIZE, 8);
+    bus_handle->input_buf = xStreamBufferCreate(HOST_BUS_RINGBUF_SIZE, 1);
     if (bus_handle->input_buf == NULL) {
         ESP_LOGE(TAG, "Input buffer create error");
         esp_host_bus_deinit(bus_handle);
         return ESP_ERR_NO_MEM;
     }
 
-    bus_handle->output_buf = xStreamBufferCreate(HOST_BUS_RINGBUF_SIZE, 8);
+    bus_handle->output_buf = xStreamBufferCreate(HOST_BUS_RINGBUF_SIZE, 1);
     if (bus_handle->output_buf == NULL) {
         ESP_LOGE(TAG, "Out buffer create error");
         esp_host_bus_deinit(bus_handle);

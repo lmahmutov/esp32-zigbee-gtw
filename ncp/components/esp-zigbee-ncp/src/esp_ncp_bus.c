@@ -70,6 +70,11 @@ static void esp_ncp_bus_task(void *pvParameter)
 {
     uart_event_t event;
     uint8_t *dtmp = (uint8_t*)malloc(NCP_BUS_BUF_SIZE);
+    if (!dtmp) {
+        ESP_LOGE(TAG, "bus task: malloc failed");
+        vTaskDelete(NULL);
+        return;
+    }
 
     esp_ncp_bus_t *bus = (esp_ncp_bus_t *)pvParameter;
     bus->state = BUS_INIT_START;
@@ -102,9 +107,12 @@ static void esp_ncp_bus_task(void *pvParameter)
                         if (pos > 0) {
                             // here we have the position of an END marker at the end (>0) of a frame
                             ncp_event.size = uart_read_bytes(CONFIG_NCP_BUS_UART_NUM, dtmp, pos + 1, portMAX_DELAY);
-                            xStreamBufferSend(bus->output_buf, dtmp, ncp_event.size, 0);
+                            xStreamBufferSend(bus->output_buf, dtmp, ncp_event.size, pdMS_TO_TICKS(100));
                             esp_ncp_send_event(&ncp_event);
                             break; // one frame at a time
+                        } else if (pos == 0) {
+                            // END marker at buffer head — consume the stale byte
+                            uart_read_bytes(CONFIG_NCP_BUS_UART_NUM, dtmp, 1, 0);
                         }
                     } while (pos >= 0);
                     break;
