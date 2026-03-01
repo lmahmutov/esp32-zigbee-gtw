@@ -95,9 +95,9 @@ static void esp_ncp_main_task(void *pv)
     esp_ncp_dev_t *dev = (esp_ncp_dev_t *)pv;
     esp_ncp_ctx_t ncp_ctx;
 
+    dev->queue = xQueueCreate(NCP_EVENT_QUEUE_LEN, sizeof(esp_ncp_ctx_t));
     dev->run = true;
     esp_ncp_bus_start(dev->bus);
-    dev->queue = xQueueCreate(NCP_EVENT_QUEUE_LEN, sizeof(esp_ncp_ctx_t));
 
     while (dev->run) {
         if (xQueueReceive(dev->queue, &ncp_ctx, portMAX_DELAY) != pdTRUE) {
@@ -105,8 +105,8 @@ static void esp_ncp_main_task(void *pv)
         }
 
         if (esp_ncp_process_event(dev, &ncp_ctx) != ESP_OK) {
-            ESP_LOGE(TAG, "Process event fail");
-            break;
+            ESP_LOGE(TAG, "Process event fail — continuing");
+            continue;
         }
     }
 

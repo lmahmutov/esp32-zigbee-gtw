@@ -60,11 +60,12 @@ esp_err_t esp_host_frame_input(const void *buffer, uint16_t len)
                 break;
             }
 
-            /* CheckSum */
-            uint16_t *checksum = (uint16_t *)(output + offerset + data_head_len + host_header->len);
+            /* CheckSum — use memcpy to avoid potential unaligned access */
+            uint16_t checksum;
+            memcpy(&checksum, output + offerset + data_head_len + host_header->len, sizeof(uint16_t));
             uint16_t crc_val = esp_crc16_le(UINT16_MAX, output + offerset, data_head_len + host_header->len);
-            if (crc_val != (*checksum)) {
-                ESP_LOGE(TAG, "Invalid multiple checksum %02x, expect %02x", *checksum, crc_val);
+            if (crc_val != checksum) {
+                ESP_LOGE(TAG, "Invalid multiple checksum %02x, expect %02x", checksum, crc_val);
                 ESP_LOG_BUFFER_HEX_LEVEL(TAG, output + offerset, (data_head_len + host_header->len + sizeof(uint16_t)), ESP_LOG_ERROR);
                 ret = ESP_ERR_INVALID_CRC;
                 break;

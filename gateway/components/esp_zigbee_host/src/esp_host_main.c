@@ -92,9 +92,9 @@ static void esp_host_main_task(void *pv)
     esp_host_dev_t *dev = (esp_host_dev_t *)pv;
     esp_host_ctx_t host_ctx;
 
+    dev->queue = xQueueCreate(HOST_EVENT_QUEUE_LEN, sizeof(esp_host_ctx_t));
     dev->run = true;
     esp_host_bus_start(dev->bus);
-    dev->queue = xQueueCreate(HOST_EVENT_QUEUE_LEN, sizeof(esp_host_ctx_t));
     
     while (dev->run) {
         if (xQueueReceive(dev->queue, &host_ctx, portMAX_DELAY) != pdTRUE) {

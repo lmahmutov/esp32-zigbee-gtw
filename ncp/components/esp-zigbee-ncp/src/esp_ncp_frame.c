@@ -53,18 +53,19 @@ esp_err_t esp_ncp_frame_output(const void *buffer, uint16_t len)
         esp_ncp_header_t *ncp_header = (esp_ncp_header_t *)output;
         uint8_t *payload = NULL;
 
-        if (ncp_header->len + data_head_len > outlen) {
-            ESP_LOGE(TAG, "Invalid packet len %d, expect %d", outlen, ncp_header->len + data_head_len);
+        if (ncp_header->len + data_head_len + sizeof(uint16_t) > outlen) {
+            ESP_LOGE(TAG, "Invalid packet len %d, expect %d", outlen, ncp_header->len + data_head_len + (int)sizeof(uint16_t));
             ESP_LOG_BUFFER_HEX_LEVEL(TAG, output, outlen, ESP_LOG_ERROR);
             ret = ESP_ERR_INVALID_SIZE;
             break;
         }
 
-        /* CheckSum */
-        uint16_t *checksum = (uint16_t *)(output + data_head_len + ncp_header->len);
+        /* CheckSum — use memcpy to avoid unaligned access on RISC-V */
+        uint16_t checksum;
+        memcpy(&checksum, output + data_head_len + ncp_header->len, sizeof(uint16_t));
         uint16_t crc_val = esp_crc16_le(UINT16_MAX, output, (outlen - sizeof(uint16_t)));
-        if (crc_val != (*checksum)) {
-            ESP_LOGE(TAG, "Invalid checksum %02x, expect %02x", *checksum, crc_val);
+        if (crc_val != checksum) {
+            ESP_LOGE(TAG, "Invalid checksum %02x, expect %02x", checksum, crc_val);
             ESP_LOG_BUFFER_HEX_LEVEL(TAG, output, outlen, ESP_LOG_ERROR);
             ret = ESP_ERR_INVALID_CRC;
             break;
